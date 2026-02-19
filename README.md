@@ -2,7 +2,7 @@
 
 **Neural Lossless Compression via Compressive Transformers + Arithmetic Coding**
 
-> Achieves **3.04 BPD** on ATLAS jet detector data — **39% better** than Gzip/Zstd.
+
 
 ## Quick Start
 
