@@ -83,7 +83,7 @@ vortex-codec/
 - Flash Attention 2 (auto-fallback to `F.scaled_dot_product_attention`)
 - KV Cache for ~10× faster autoregressive decompression
 - Arithmetic Coding via `torchac`
-- SwiGLU feed-forward (LLaMA-style)
+- SwiGLU feed-forward 
 
 ## ATLAS Dataset
 - Source: CERN EOS `root://eospublic.cern.ch//eos/opendata/atlas/datascience/ATLAS-FTAG-2023-05/`
