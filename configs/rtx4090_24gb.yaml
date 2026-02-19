@@ -1,0 +1,35 @@
+# python scripts/train.py --config configs/rtx4090_24gb.yaml
+
+model:
+  d_model:    768
+  n_layers:   12
+  n_heads:    12
+  d_ff:       3072
+  dropout:    0.1
+  vocab_size: 256
+
+compressive_memory:
+  window_size:      512
+  compression_rate: 4
+
+training:
+  batch_size:      64
+  learning_rate:   3e-4
+  max_steps:       150000
+  warmup_steps:    4000
+  grad_clip:       1.0
+  weight_decay:    0.01
+  mixed_precision: true
+  seed:            42
+
+data:
+  window_size: 512
+  stride:      256
+  num_workers: 4
+  streaming:   false
+
+paths:
+  train_data:     experiments/atlas_experiment/data/atlas_200m.bin
+  val_data:       experiments/atlas_experiment/data/atlas_val.bin
+  checkpoint_dir: experiments/atlas_experiment/checkpoints/
+  log_dir:        experiments/atlas_experiment/runs/
