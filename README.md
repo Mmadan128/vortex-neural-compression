@@ -1,4 +1,4 @@
-# Vortex-Codec 🌀
+# Vortex-Codec 
 
 **Neural Lossless Compression via Compressive Transformers + Arithmetic Coding**
 
