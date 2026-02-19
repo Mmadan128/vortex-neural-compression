@@ -80,7 +80,7 @@ vortex-codec/
 ## Architecture
 - 8-layer Transformer, d=512, 8 heads
 - Compressive Attention → **O(1)** memory via 4:1 Conv compression
-- Flash Attention 2 (auto-fallback to `F.scaled_dot_product_attention`)
+- Flash Attention 2 
 - KV Cache for ~10× faster autoregressive decompression
 - Arithmetic Coding via `torchac`
 - SwiGLU feed-forward 
