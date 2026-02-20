@@ -1,4 +1,3 @@
-# python scripts/train.py --config configs/rtx4090_24gb.yaml
 
 model:
   d_model:    768

@@ -1,12 +1,10 @@
-# Vortex-Codec — ATLAS experiment configuration
-# Run: python scripts/train.py --config experiments/atlas_experiment/config.yaml
 
 experiment:
   name: atlas_experiment
   description: >
     Byte-level neural compression on ATLAS FTAG b-tagging jet data.
-    Structured dtype: 30 fields (pt, eta, GN2v01_pb, DL1dv01_pb, kinematics, labels).
-    Source: root://eospublic.cern.ch//eos/opendata/atlas/datascience/ATLAS-FTAG-2023-05/
+    ttbar medium dataset (~13 GB) with 80/10/10 train/val/test split.
+    Source: ATLAS-FTAG-2023-05 (eospublic.cern.ch)
 
 model:
   d_model:    512
@@ -21,24 +19,35 @@ compressive_memory:
   compression_rate: 4
 
 training:
-  batch_size:      32
-  learning_rate:   3e-4
-  max_steps:       100000
-  warmup_steps:    4000
-  grad_clip:       1.0
-  weight_decay:    0.01
-  mixed_precision: true
-  seed:            42
+  batch_size:               6
+  grad_accumulation_steps:  8
+  learning_rate:            3e-4
+  max_steps:                300000
+  warmup_steps:             6000
+  grad_clip:                1.0
+  weight_decay:             0.01
+  mixed_precision:          true
+  gradient_checkpointing:   true
+  compile_model:            false
+  seed:                     42
 
 data:
   window_size: 512
-  stride:      256
+  stride:      128
   num_workers: 4
-  streaming:   false   # set true for very large files
+  streaming:   false
 
 paths:
-  # Paths are relative to repo root
-  train_data:     experiments/atlas_experiment/data/atlas_200m.bin
+  train_data:     experiments/atlas_experiment/data/atlas_train.bin
   val_data:       experiments/atlas_experiment/data/atlas_val.bin
   checkpoint_dir: experiments/atlas_experiment/checkpoints/
   log_dir:        experiments/atlas_experiment/runs/
+
+evaluation:
+  test_data:      experiments/atlas_experiment/data/atlas_test.bin
+  eval_interval:  5000
+  eval_batches:   200
+
+logging:
+  log_interval:  50
+  save_interval: 5000

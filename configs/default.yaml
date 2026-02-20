@@ -1,4 +1,3 @@
-# python scripts/train.py --config configs/default.yaml
 
 model:
   d_model:    512

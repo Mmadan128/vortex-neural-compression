@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Usage: python scripts/compress.py --model MODEL --input INPUT --output OUTPUT --config CONFIG
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,15 +49,19 @@ def main():
     chunks = data.reshape(-1, chunk_size)
     print(f"Input : {args.input}  ({original_size/1024/1024:.2f} MB,  {len(chunks)} chunks)")
 
-    t0 = time.time()
+    fp16 = args.device == "cuda"
+    t0   = time.time()
     compressed_chunks, total_bpd, memories = [], 0.0, None
+
     with torch.no_grad():
         for chunk in tqdm(chunks, desc="Compressing"):
             x = torch.from_numpy(chunk.astype(np.int64)).unsqueeze(0).to(args.device)
-            probs, memories, _ = model.get_probs(x, memories)
+            with torch.amp.autocast("cuda", enabled=fp16):
+                probs, memories, _ = model.get_probs(x, memories)
             memories = [mm.detach() if mm is not None else None for mm in memories]
-            compressed_chunks.append(encode(probs, x.short()))
-            total_bpd += theoretical_bpd(probs, x)
+            probs_f32 = probs.float()
+            compressed_chunks.append(encode(probs_f32, x.short()))
+            total_bpd += theoretical_bpd(probs_f32, x)
 
     mean_bpd = total_bpd / len(chunks)
     with open(args.output, "wb") as f:
