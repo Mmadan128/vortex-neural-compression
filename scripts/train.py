@@ -12,7 +12,7 @@ from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
 from vortex.data.dataset import make_loaders
 from vortex.utils.training import (cosine_with_warmup, set_lr,
                                    save_checkpoint, load_checkpoint,
-                                   EarlyStopping)
+                                   EarlyStopping, get_amp_dtype)
 
 try:
     import gzip as _gz, zlib as _zl, lzma as _lz
@@ -89,29 +89,21 @@ def main():
     torch.manual_seed(cfg["training"].get("seed", 42))
     random.seed(cfg["training"].get("seed", 42))
 
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32       = True
-    torch.backends.cudnn.benchmark        = True
+    try:
+        torch.backends.cuda.matmul.fp32_precision  = "tf32"
+        torch.backends.cudnn.conv.fp32_precision   = "tf32"
+    except AttributeError:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32       = True
+    torch.backends.cudnn.benchmark = True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    amp_dtype = torch.float16
-    if device == "cuda":
-        is_rocm = torch.version.hip is not None
-        if is_rocm:
-            print(f"  [ROCm] HIP version : {torch.version.hip}")
-            print(f"  [ROCm] Device      : {torch.cuda.get_device_name(0)}")
-            os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF",
-                                  "max_split_size_mb:512,garbage_collection_threshold:0.8")
-            try:
-                rocm_ver = tuple(int(x) for x in torch.version.hip.split(".")[:2])
-                if rocm_ver >= (5, 7):
-                    amp_dtype = torch.bfloat16
-                    print(f"  [ROCm] AMP dtype   : bfloat16 (ROCm {torch.version.hip})")
-                else:
-                    print(f"  [ROCm] AMP dtype   : float16 (ROCm < 5.7)")
-            except Exception:
-                pass
+    amp_dtype = get_amp_dtype(device)
+    if device == "cuda" and torch.version.hip is not None:
+        os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF",
+                              "max_split_size_mb:512,garbage_collection_threshold:0.8")
+        print(f"  [ROCm] {torch.cuda.get_device_name(0)}  amp={amp_dtype}")
 
     fp16 = cfg["training"].get("mixed_precision", True) and device == "cuda"
     grad_accum = cfg["training"].get("grad_accumulation_steps", 1)
@@ -229,10 +221,10 @@ def main():
     t0            = time.time()
     epoch         = 0
 
+    memories = None
     while step < t["max_steps"]:
         epoch += 1
         model.train()
-        memories = None
         pbar = tqdm(train_dl, desc=f"Epoch {epoch}",
                     dynamic_ncols=True, leave=True)
         optimizer.zero_grad(set_to_none=True)
@@ -285,7 +277,7 @@ def main():
 
             if step > 0 and step % eval_interval == 0 and val_dl:
                 model.eval()
-                val_total, val_cnt, val_mems = 0.0, 0, None
+                val_nats, val_tokens, val_mems = 0.0, 0, None
                 with torch.no_grad():
                     for vbatch in val_dl:
                         vbatch = vbatch.to(device)
@@ -295,10 +287,12 @@ def main():
                                 vlogits[:, :-1].reshape(-1, m["vocab_size"]),
                                 vbatch[:, 1:].reshape(-1),
                             )
-                        val_total += vloss.item(); val_cnt += 1
+                        n_tok = vbatch.size(0) * (vbatch.size(1) - 1)
+                        val_nats   += vloss.item() * n_tok
+                        val_tokens += n_tok
                         val_mems = [mm.detach() if mm is not None else None
                                     for mm in val_mems]
-                val_bpd = val_total / val_cnt / math.log(2)
+                val_bpd = val_nats / val_tokens / math.log(2)
                 writer.add_scalar("val/bpd", val_bpd, step)
 
                 elapsed_h = (time.time() - t0) / 3600
@@ -340,7 +334,7 @@ def main():
 
         if val_dl and step % eval_interval != 0:
             model.eval()
-            val_total, val_cnt, val_mems = 0.0, 0, None
+            val_nats, val_tokens, val_mems = 0.0, 0, None
             with torch.no_grad():
                 for vbatch in val_dl:
                     vbatch = vbatch.to(device)
@@ -350,10 +344,12 @@ def main():
                             vlogits[:, :-1].reshape(-1, m["vocab_size"]),
                             vbatch[:, 1:].reshape(-1),
                         )
-                    val_total += vloss.item(); val_cnt += 1
+                    n_tok = vbatch.size(0) * (vbatch.size(1) - 1)
+                    val_nats   += vloss.item() * n_tok
+                    val_tokens += n_tok
                     val_mems = [mm.detach() if mm is not None else None
                                 for mm in val_mems]
-            val_bpd = val_total / val_cnt / math.log(2)
+            val_bpd = val_nats / val_tokens / math.log(2)
             writer.add_scalar("val/bpd", val_bpd, step)
 
             elapsed_h = (time.time() - t0) / 3600

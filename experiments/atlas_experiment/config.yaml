@@ -33,7 +33,7 @@ training:
 
 data:
   window_size: 512
-  stride:      128
+  stride:      256
   num_workers: 4
   streaming:   false
 

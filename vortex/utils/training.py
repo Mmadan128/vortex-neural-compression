@@ -1,4 +1,4 @@
-# Usage: from vortex.utils.training import cosine_with_warmup, save_checkpoint
+# Usage: from vortex.utils.training import cosine_with_warmup, save_checkpoint, get_amp_dtype
 import os, math
 import torch
 
@@ -44,3 +44,14 @@ class EarlyStopping:
         else:
             self.counter += 1
         return self.counter >= self.patience
+
+
+def get_amp_dtype(device: str) -> "torch.dtype":
+    import torch
+    if device == "cuda" and torch.version.hip is not None:
+        try:
+            if tuple(int(x) for x in torch.version.hip.split(".")[:2]) >= (5, 7):
+                return torch.bfloat16
+        except Exception:
+            pass
+    return torch.float16

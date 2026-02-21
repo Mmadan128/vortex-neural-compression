@@ -26,7 +26,7 @@ except ImportError:
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
 from vortex.data.dataset import make_loaders
-from vortex.utils.training import load_checkpoint
+from vortex.utils.training import load_checkpoint, get_amp_dtype
 
 
 
@@ -140,9 +140,9 @@ def print_table(rows: list, vortex: dict):
 
 
 
-def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype) -> dict:
+def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype, max_tokens=None) -> dict:
     criterion = nn.CrossEntropyLoss()
-    total, cnt = 0.0, 0
+    total_nats, total_tokens = 0.0, 0
     mems = None
 
     with torch.no_grad():
@@ -154,11 +154,14 @@ def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype) -> dict:
                     logits[:, :-1].reshape(-1, vocab_size),
                     batch[:, 1:].reshape(-1),
                 )
-            total += loss.item()
-            cnt   += 1
-            mems   = [mm.detach() if mm is not None else None for mm in mems]
+            n_tok = batch.size(0) * (batch.size(1) - 1)
+            total_nats   += loss.item() * n_tok
+            total_tokens += n_tok
+            mems = [mm.detach() if mm is not None else None for mm in mems]
+            if max_tokens and total_tokens >= max_tokens:
+                break
 
-    bpd = total / cnt / math.log(2)
+    bpd = total_nats / total_tokens / math.log(2)
     return {
         "bpd":     bpd,
         "ratio_x": 8 / bpd,
@@ -176,6 +179,8 @@ def parse_args():
     p.add_argument("--sample-mb",    type=float, default=SAMPLE_MB,
                    help=f"MB of data to use for baselines (default: {SAMPLE_MB})")
     p.add_argument("--batch-size",   type=int, default=32)
+    p.add_argument("--full-vortex",  action="store_true",
+                   help="Evaluate Vortex on full file; baselines still use --sample-mb")
     return p.parse_args()
 
 
@@ -188,15 +193,7 @@ def main():
     data_size_gb = os.path.getsize(args.data) / 1e9
     exp = cfg.get("experiment", {}).get("name", "experiment")
 
-    amp_dtype = torch.float16
-    if args.device == "cuda" and torch.version.hip is not None:
-        try:
-            rocm_ver = tuple(int(x) for x in torch.version.hip.split(".")[:2])
-            if rocm_ver >= (5, 7):
-                amp_dtype = torch.bfloat16
-        except Exception:
-            pass
-
+    amp_dtype = get_amp_dtype(args.device)
     fp16 = args.device == "cuda"
 
     print(f"\n{'='*62}")
@@ -243,7 +240,8 @@ def main():
         streaming=True,
     )
 
-    vortex = eval_vortex(model, dl, m["vocab_size"], args.device, fp16, amp_dtype)
+    max_tok = None if args.full_vortex else int(args.sample_mb * 1024 * 1024)
+    vortex = eval_vortex(model, dl, m["vocab_size"], args.device, fp16, amp_dtype, max_tok)
 
     print()
     if baseline_results:
