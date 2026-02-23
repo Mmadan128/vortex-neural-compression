@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 
 class PositionalEncoding(nn.Module):
@@ -19,51 +20,96 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)]
 
 
+class TDTEmbedding(nn.Module):
+    """Per-type embedding for IEEE-754 float32 byte streams.
+
+    Each of the 4 byte positions within a float32 gets its own lookup table,
+    since they have very different entropy profiles.
+    """
+
+    def __init__(self, d_model: int, vocab_size: int = 256):
+        super().__init__()
+        self.d_model = d_model
+        self.embeds = nn.ModuleList([
+            nn.Embedding(vocab_size, d_model) for _ in range(4)
+        ])
+        self.type_scale = nn.Parameter(torch.ones(4))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x : (B, T) -> (B, T, d_model)"""
+        B, T = x.shape
+        pos_in_float = torch.arange(T, device=x.device) % 4
+
+        all_embeds = torch.stack([e(x) for e in self.embeds], dim=0)  # (4,B,T,D)
+        all_embeds = all_embeds.permute(1, 2, 0, 3)                   # (B, T, 4, D)
+
+        idx = (pos_in_float
+               .view(1, T, 1, 1)
+               .expand(B, T, 1, self.d_model))
+        selected = all_embeds.gather(2, idx).squeeze(2)  # (B, T, D)
+
+        scale     = torch.softmax(self.type_scale, dim=0)
+        scale_map = scale[pos_in_float]
+        return selected * scale_map.view(1, T, 1)
+
+
+class LearnableTokenEviction(nn.Module):
+    """Content-adaptive token selection via a lightweight importance scorer.
+
+    Keeps the top-k highest-scoring tokens (k = ceil(T / rate)) in original
+    temporal order, replacing strided conv downsampling.
+    """
+
+    def __init__(self, d_model: int, rate: int = 4, kernel_size: int = 7):
+        super().__init__()
+        self.rate    = rate
+        self.d_model = d_model
+        self.scorer = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=kernel_size,
+                      padding=kernel_size // 2, groups=d_model, bias=False),
+            nn.Conv1d(d_model, 1, kernel_size=1, bias=True),
+        )
+        # Value-preserving linear projection after token selection.
+        self.proj = nn.Conv1d(d_model, d_model, kernel_size=1, bias=False)
+        self.norm = nn.LayerNorm(d_model)
+
+    def compress(self, acts: torch.Tensor) -> torch.Tensor:
+        """acts: (B, T, D) -> (B, k, D)"""
+        B, T, D = acts.shape
+        k = max(1, min(math.ceil(T / self.rate), T))
+
+        x_t = acts.transpose(1, 2)
+        scores = self.scorer(x_t).squeeze(1)  # (B, T)
+
+        _, topk_idx = scores.topk(k, dim=1)
+        topk_idx, _ = topk_idx.sort(dim=1)
+        idx_exp  = topk_idx.unsqueeze(-1).expand(B, k, D)
+        selected = acts.gather(1, idx_exp)  # (B, k, D)
+
+        # Straight-through soft gating for end-to-end training.
+        soft_w   = torch.sigmoid(scores).gather(1, topk_idx)
+        selected = selected * soft_w.unsqueeze(-1)
+
+        # Project and normalise.
+        out = self.proj(selected.transpose(1, 2)).transpose(1, 2)
+        return self.norm(out)
+
+
 class MemoryManager(nn.Module):
-    """
-    Compresses old activations via strided Conv1d (learned compression).
-    [OPT] Added two-layer compression with ELU nonlinearity between them
-          so the compressor can learn nonlinear summaries, not just a linear
-          projection — improves BPD at zero extra inference cost.
-    [OPT] Added depthwise-separable option to halve conv parameters.
-    """
+    """LTE-backed memory compressor. Keeps the most informative tokens."""
 
     def __init__(self, d_model: int, rate: int = 4, deep: bool = True):
         super().__init__()
         self.rate = rate
-        self.deep = deep
-        if deep:
-            self.conv1 = nn.Conv1d(d_model, d_model, kernel_size=rate,
-                                   stride=rate, groups=d_model)
-            self.conv2 = nn.Conv1d(d_model, d_model, kernel_size=1)
-            self.act   = nn.ELU()
-        else:
-            self.conv = nn.Conv1d(d_model, d_model, kernel_size=rate, stride=rate)
-        self.norm = nn.LayerNorm(d_model)
+        self.lte  = LearnableTokenEviction(d_model, rate)
 
     def compress(self, acts: torch.Tensor) -> torch.Tensor:
-        """acts: (B, T, D) -> (B, T/rate, D)"""
-        x = acts.transpose(1, 2)
-        if self.deep:
-            x = self.act(self.conv1(x))
-            x = self.conv2(x)
-        else:
-            x = self.conv(x)
-        return self.norm(x.transpose(1, 2))
+        """acts: (B, T, D) -> (B, ceil(T/rate), D)"""
+        return self.lte.compress(acts)
 
 
 class CompressiveAttention(nn.Module):
-    """
-    Multi-head attention with two-tier memory:
-      - recent:     last `window` tokens at full resolution
-      - compressed: older tokens compressed rate:1
-
-    [OPT] Fused QKV projection (single matmul, ~15% faster on small d_model).
-    [OPT] Uses F.scaled_dot_product_attention (PyTorch fused kernel, no explicit
-          softmax allocation, works on 4070 without flash_attn package).
-    [OPT] Separate Q/K/V projections replaced by single fused linear.
-    [OPT] Removed bias on projection layers (saves memory, marginal quality).
-    """
+    """Multi-head attention with two-tier memory (recent + compressed past)."""
 
     def __init__(self, d_model: int, n_heads: int,
                  window: int = 512, rate: int = 4, dropout: float = 0.1):
@@ -73,9 +119,11 @@ class CompressiveAttention(nn.Module):
         self.d_k     = d_model // n_heads
         self.window  = window
         self.dropout = dropout
-        self.mem_mgr = MemoryManager(d_model, rate, deep=True)
+        self.mem_mgr = MemoryManager(d_model, rate)
         self.qkv     = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.mem_kv  = nn.Linear(d_model, 2 * d_model, bias=False)
         self.out     = nn.Linear(d_model, d_model, bias=False)
+        self.infini_beta = nn.Parameter(torch.zeros(n_heads, 1, 1))
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         """(B, T, D) -> (B, n_heads, T, d_k)"""
@@ -90,16 +138,27 @@ class CompressiveAttention(nn.Module):
         K = self._split_heads(k)
         V = self._split_heads(v)
 
-        if comp_mem is not None:
-            qm, km, vm = self.qkv(comp_mem).chunk(3, dim=-1)
-            K = torch.cat([self._split_heads(km), K], dim=2)
-            V = torch.cat([self._split_heads(vm), V], dim=2)
-
-        out = F.scaled_dot_product_attention(
+        # Local causal attention on the current window.
+        out_local = F.scaled_dot_product_attention(
             Q, K, V,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True,
         )
+
+        if comp_mem is not None:
+            km, vm = self.mem_kv(comp_mem).chunk(2, dim=-1)
+            Km = self._split_heads(km)
+            Vm = self._split_heads(vm)
+            out_mem = F.scaled_dot_product_attention(
+                Q, Km, Vm,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+            beta = torch.sigmoid(self.infini_beta)
+            out  = beta * out_mem + (1.0 - beta) * out_local
+        else:
+            out = out_local
+
         out = out.transpose(1, 2).contiguous().view(B, T, D)
 
         new_comp = self.mem_mgr.compress(x)
@@ -113,12 +172,7 @@ class CompressiveAttention(nn.Module):
 
 
 class SwiGLU(nn.Module):
-    """
-    [OPT] Replaces GELU MLP with SwiGLU (Shazeer 2020).
-    Empirically 0.1-0.3 BPD better than GELU at same parameter count
-    because the gating allows input-dependent activation patterns.
-    No bias on any linear — consistent with modern LLM practice.
-    """
+    """SwiGLU feed-forward (Shazeer 2020). No bias, no dropout."""
     def __init__(self, d_model: int, d_ff: int):
         super().__init__()
         self.gate = nn.Linear(d_model, d_ff, bias=False)
@@ -130,12 +184,6 @@ class SwiGLU(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """
-    [OPT] Removed Dropout from residual path — at small batch sizes (16)
-          dropout in the residual adds noise without regularisation benefit.
-          Kept dropout inside attention (via SDPA dropout_p).
-    [OPT] Switched FF from GELU MLP to SwiGLU.
-    """
     def __init__(self, d_model, n_heads, d_ff, window, rate, dropout):
         super().__init__()
         self.attn = CompressiveAttention(d_model, n_heads, window, rate, dropout)
@@ -151,27 +199,21 @@ class TransformerBlock(nn.Module):
 
 
 class CompressiveTransformer(nn.Module):
-    """
-    Byte-level compressive transformer — RTX 4070 optimised.
+    """Byte-level compressive transformer with LTE memory, Infini-Attention, SwiGLU.
 
-    Changes vs original:
-      1. Fused QKV projection (single matmul)
-      2. F.scaled_dot_product_attention (Ada fused kernel, no flash_attn package needed)
-      3. SwiGLU feed-forward instead of GELU MLP
-      4. Deep depthwise-separable memory compressor (nonlinear, fewer params)
-      5. Removed residual dropout (helps at small batch sizes)
-      6. gradient_checkpointing support (call enable_gradient_checkpointing() to trade
-         ~30% speed for ~40% less VRAM — lets you run d_model=512, n_layers=8)
-      7. torch.compile() compatible — no dynamic shapes in hot path
-
-    Memory stays O(window + c_max) regardless of total sequence length.
+    Optional: use_tdt=True enables TDT embedding for IEEE-754 float32 data.
     """
 
     def __init__(self, vocab_size: int = 256, d_model: int = 512,
                  n_layers: int = 8, n_heads: int = 8, d_ff: int = 2048,
-                 window: int = 512, compression_rate: int = 4, dropout: float = 0.1):
+                 window: int = 512, compression_rate: int = 4,
+                 dropout: float = 0.1, use_tdt: bool = False):
         super().__init__()
-        self.embed  = nn.Embedding(vocab_size, d_model)
+        self.use_tdt = use_tdt
+        if use_tdt:
+            self.embed = TDTEmbedding(d_model, vocab_size)
+        else:
+            self.embed = nn.Embedding(vocab_size, d_model)
         self.pe     = PositionalEncoding(d_model)
         self.layers = nn.ModuleList([
             TransformerBlock(d_model, n_heads, d_ff, window, compression_rate, dropout)
@@ -183,25 +225,27 @@ class CompressiveTransformer(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
+        n = sum(1 for _ in self.layers)
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.02 / math.sqrt(2 * sum(
-                    1 for _ in self.layers)))
+                nn.init.normal_(m.weight, std=0.02 / math.sqrt(2 * n))
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, std=0.02)
+            elif isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def enable_gradient_checkpointing(self):
         self._use_grad_ckpt = True
 
     def _forward_layer(self, layer, x, mem):
-        """Wrapper so grad-ckpt can be applied per-layer."""
         if self._use_grad_ckpt and self.training:
-            from torch.utils.checkpoint import checkpoint
             def fn(x, mem):
                 return layer(x, mem if mem is not None else None)
-            return checkpoint(fn, x, mem, use_reentrant=False)
+            return grad_checkpoint(fn, x, mem, use_reentrant=False)
         return layer(x, mem)
 
     def forward(self, x: torch.Tensor, memories=None):

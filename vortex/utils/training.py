@@ -47,7 +47,6 @@ class EarlyStopping:
 
 
 def get_amp_dtype(device: str) -> "torch.dtype":
-    import torch
     if device == "cuda" and torch.version.hip is not None:
         try:
             if tuple(int(x) for x in torch.version.hip.split(".")[:2]) >= (5, 7):

@@ -18,6 +18,13 @@ compressive_memory:
   window_size:      512
   compression_rate: 4
 
+# use_tdt and cat are intentionally disabled here — MI300X runs large batches
+# without needing chunk scheduling or typed byte embeddings.
+use_tdt: false
+
+cat:
+  enabled: false
+
 training:
   batch_size:               128
   grad_accumulation_steps:  1

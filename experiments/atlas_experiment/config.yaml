@@ -13,10 +13,21 @@ model:
   d_ff:       2048
   dropout:    0.1
   vocab_size: 256
+  # Feature 4 — TDT: set true when input is raw IEEE-754 float32 binary
+  # (e.g. ATLAS HEP data). Four per-type embedding tables capture the
+  # distinct entropy profiles of sign, exponent and mantissa bytes.
+  use_tdt: true
 
 compressive_memory:
   window_size:      512
   compression_rate: 4
+
+# Feature 2 — CAT Dynamic Chunking
+# Wraps the model to train on multiple chunk sizes simultaneously.
+# At test time pass chunk_size= to control quality vs compute without retraining.
+cat:
+  enabled:     true
+  chunk_sizes: [128, 256, 512]
 
 training:
   batch_size:               6
@@ -45,7 +56,7 @@ paths:
 
 evaluation:
   test_data:      experiments/atlas_experiment/data/atlas_test.bin
-  eval_interval:  5000
+  eval_interval:  2000
   eval_batches:   200
 
 logging:

@@ -7,20 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class MemmapWindowDataset(Dataset):
-    """
-    Memory-mapped binary dataset. The file is NEVER loaded into RAM —
-    the OS pages in only the bytes actually needed for each window.
-
-    RAM overhead regardless of file size:
-      - self.data  : np.memmap handle (no data in RAM until accessed)
-      - self.n_windows : one integer
-      - No offset list, no window copies
-
-    For a 13 GB file at window=512, stride=128:
-      OLD BinaryWindowDataset  : ~50 GB RAM (explodes before training)
-      OLD StreamingBinaryDataset: ~800 MB RAM (offset list) + slow file open/close
-      NEW MemmapWindowDataset  : ~0 MB RAM overhead, fast random access
-    """
+    """Memory-mapped binary dataset. Never loads the full file into RAM."""
 
     def __init__(self, path: str, window: int = 512, stride: int = 256):
         self.path      = path
@@ -52,18 +39,7 @@ def make_loaders(train_path: str, val_path: str = None,
                  window: int = 512, stride: int = 256,
                  batch_size: int = 32, num_workers: int = 4,
                  streaming: bool = False):
-    """
-    Returns (train_dataloader, val_dataloader | None).
-
-    Uses MemmapWindowDataset regardless of the streaming flag —
-    memmap is strictly better than both the old in-RAM and old streaming
-    implementations.
-
-    num_workers note for MI300X:
-      Unified memory means forked workers share the same physical HBM pool.
-      Set num_workers=0 in your config to avoid fork overhead. The memmap
-      file descriptor is safely inherited by worker processes either way.
-    """
+    """Returns (train_dataloader, val_dataloader | None)."""
 
     if streaming is False and num_workers > 0:
         pass

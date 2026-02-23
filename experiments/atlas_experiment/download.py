@@ -1,6 +1,6 @@
 # Usage: python experiments/atlas_experiment/download.py --all-steps
 from __future__ import annotations
-import subprocess, argparse, json, math, os, shutil, sys, urllib.request
+import subprocess, argparse, json, math, os, shutil, ssl, sys, urllib.request
 from typing import Iterable
 import numpy as np
 
@@ -70,8 +70,9 @@ def download_file(src: str, dst: str) -> None:
         except subprocess.CalledProcessError:
             print("[download] xrdcp failed, trying HTTPS...")
 
-    import ssl
     https_url = root_to_https(src)
+    print(f"[download] HTTPS -> {dst}")
+    ctx = ssl._create_unverified_context()
     print(f"[download] HTTPS -> {dst}")
     ctx = ssl._create_unverified_context()
     with urllib.request.urlopen(https_url, context=ctx) as r, open(dst, "wb") as f:
@@ -267,13 +268,12 @@ def main(argv=None):
                 print(f"[extract] {hp} not found — run --download first")
 
     if args.combine:
-        import shutil as sh
         bp = bin_path("mc-flavtag-ttbar-medium.h5")
         if not os.path.exists(COMBINED_BIN):
             if not os.path.exists(bp):
                 print(f"[combine] {bp} not found — run --extract first")
             else:
-                sh.copy2(bp, COMBINED_BIN)
+                shutil.copy2(bp, COMBINED_BIN)
                 print(f"[combine] copied {bp} -> {COMBINED_BIN}")
 
     if args.split:

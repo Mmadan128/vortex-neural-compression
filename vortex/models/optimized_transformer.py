@@ -1,18 +1,24 @@
 # Usage: from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
 import math
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 try:
     from flash_attn import flash_attn_func
     FLASH_AVAILABLE = True
-    print("[vortex] Flash Attention 2 available — using FA2 kernel")
 except ImportError:
     FLASH_AVAILABLE = False
-    print("[vortex] Flash Attention 2 not found — using PyTorch fused SDPA (Ada kernel, still fast)")
 
-from .compressive_transformer import PositionalEncoding, MemoryManager, SwiGLU
+# LTE-backed MemoryManager, TDTEmbedding, and SwiGLU from compressive_transformer.
+from .compressive_transformer import (
+    PositionalEncoding,
+    MemoryManager,
+    TDTEmbedding,
+    SwiGLU,
+)
 
 
 class RMSNorm(nn.Module):
@@ -27,22 +33,8 @@ class RMSNorm(nn.Module):
 
 
 class OptimisedCompressiveAttention(nn.Module):
-    """
-    Flash Attention 2 when available; otherwise PyTorch fused SDPA.
-    Supports KV cache for O(1) per-step cost during decoding.
-
-    Changes vs original:
-    [OPT] _project now returns tensors not generators — fixes subtle bug where
-          generator was exhausted on second call (comp_mem path).
-    [OPT] comp_mem K/V projection uses a separate lightweight linear (d_model ->
-          d_model, no bias) so the memory vectors don't share weights with the
-          current-token projections. This lets the model learn different
-          representations for compressed vs fresh context.
-    [OPT] KV cache detach moved to after memory concatenation so the cache
-          includes compressed context — important for long sequences.
-    [OPT] Memory gate: a learned scalar per head that blends compressed memory
-          contribution, initialized near zero so training starts without memory
-          (more stable early training).
+    """Multi-head attention with Flash Attention 2 / PyTorch SDPA, KV cache,
+    LTE memory compression, and Infini-Attention beta gating.
     """
 
     def __init__(self, d_model: int, n_heads: int,
@@ -53,11 +45,12 @@ class OptimisedCompressiveAttention(nn.Module):
         self.d_k     = d_model // n_heads
         self.window  = window
         self.dropout = dropout
-        self.mem_mgr = MemoryManager(d_model, rate, deep=True)
-        self.qkv     = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.mem_kv  = nn.Linear(d_model, 2 * d_model, bias=False)
-        self.out     = nn.Linear(d_model, d_model, bias=False)
-        self.mem_gate = nn.Parameter(torch.zeros(n_heads, 1, 1))
+        self.mem_mgr  = MemoryManager(d_model, rate)
+        self.qkv      = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.mem_kv   = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.out      = nn.Linear(d_model, d_model, bias=False)
+        # Beta init at -3 so training starts near pure local attention.
+        self.infini_beta = nn.Parameter(torch.full((n_heads, 1, 1), -3.0))
 
     def _split(self, x: torch.Tensor) -> torch.Tensor:
         """(B, T, D) -> (B, n_heads, T, d_k)"""
@@ -65,9 +58,28 @@ class OptimisedCompressiveAttention(nn.Module):
         return x.view(B, T, self.n_heads, self.d_k).transpose(1, 2)
 
     def _project(self, x: torch.Tensor):
-        """Returns actual tensors, not a generator — avoids exhaustion bug."""
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         return q, k, v
+
+    def _sdpa(self, Q, K, V, causal: bool) -> torch.Tensor:
+        """Flash-Attn 2 for causal; PyTorch SDPA otherwise."""
+        if FLASH_AVAILABLE and Q.is_cuda and causal:
+            # flash_attn_func expects (B, seqlen, nheads, headdim) in fp16/bf16
+            dtype = Q.dtype
+            out = flash_attn_func(
+                Q.transpose(1, 2).half(),
+                K.transpose(1, 2).half(),
+                V.transpose(1, 2).half(),
+                dropout_p=self.dropout if self.training else 0.0,
+                causal=True,
+            ).to(dtype).transpose(1, 2)
+        else:
+            out = F.scaled_dot_product_attention(
+                Q, K, V,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=causal,
+            )
+        return out
 
     def forward(self, x: torch.Tensor, comp_mem=None, kv_cache=None):
         B, T, D = x.shape
@@ -80,30 +92,19 @@ class OptimisedCompressiveAttention(nn.Module):
             K = torch.cat([kv_cache["k"], K], dim=2)
             V = torch.cat([kv_cache["v"], V], dim=2)
 
+        out_local = self._sdpa(Q, K, V, causal=True)
+
         if comp_mem is not None:
             km, vm = self.mem_kv(comp_mem).chunk(2, dim=-1)
             Km = self._split(km)
             Vm = self._split(vm)
-            gate = torch.sigmoid(self.mem_gate)
-            K = torch.cat([gate * Km, K], dim=2)
-            V = torch.cat([gate * Vm, V], dim=2)
+            out_mem  = self._sdpa(Q, Km, Vm, causal=False)
+            beta     = torch.sigmoid(self.infini_beta)
+            out      = beta * out_mem + (1.0 - beta) * out_local
+        else:
+            out = out_local
 
         new_cache = {"k": K.detach(), "v": V.detach()}
-
-        if FLASH_AVAILABLE and x.is_cuda:
-            out = flash_attn_func(
-                Q.transpose(1, 2).half(),
-                K.transpose(1, 2).half(),
-                V.transpose(1, 2).half(),
-                dropout_p=self.dropout if self.training else 0.0,
-                causal=True,
-            ).to(x.dtype).transpose(1, 2)
-        else:
-            out = F.scaled_dot_product_attention(
-                Q, K, V,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True,
-            )
 
         out = out.transpose(1, 2).contiguous().view(B, T, D)
 
@@ -118,10 +119,7 @@ class OptimisedCompressiveAttention(nn.Module):
 
 
 class OptimisedBlock(nn.Module):
-    """
-    [OPT] Switched LayerNorm -> RMSNorm (~15% faster, same quality).
-    [OPT] Removed residual dropout — hurts at small batch sizes.
-    """
+    """Transformer block with RMSNorm and SwiGLU."""
     def __init__(self, d_model, n_heads, d_ff, window, rate, dropout):
         super().__init__()
         self.attn = OptimisedCompressiveAttention(d_model, n_heads, window, rate, dropout)
@@ -137,29 +135,19 @@ class OptimisedBlock(nn.Module):
 
 
 class OptimisedCompressiveTransformer(nn.Module):
-    """
-    Drop-in replacement for CompressiveTransformer.
-
-    RTX 4070 improvements over original optimised version:
-      1.  RMSNorm instead of LayerNorm — ~15% faster normalisation
-      2.  Separate mem_kv projection in attention — distinct weights for
-          compressed vs fresh context (better quality)
-      3.  Memory gate per head — stabilises early training
-      4.  Fixed generator exhaustion bug in _project()
-      5.  KV cache stored post-memory-concat (correct long-range behaviour)
-      6.  Deep depthwise-separable memory compressor (nonlinear compression)
-      7.  Gradient checkpointing support
-      8.  torch.compile() compatible
-      9.  Cosine LR schedule helper
-      10. Parameter count / VRAM estimator
-
-    Flash Attention 2 | KV Cache | SwiGLU | RMSNorm | Pre-Norm
+    """Byte-level compressive transformer: RMSNorm, Flash Attention 2,
+    LTE memory, Infini-Attention, TDT embedding (opt-in), KV cache.
     """
 
     def __init__(self, vocab_size=256, d_model=512, n_layers=8, n_heads=8,
-                 d_ff=2048, window=512, compression_rate=4, dropout=0.1):
+                 d_ff=2048, window=512, compression_rate=4, dropout=0.1,
+                 use_tdt: bool = False):
         super().__init__()
-        self.embed  = nn.Embedding(vocab_size, d_model)
+        self.use_tdt = use_tdt
+        if use_tdt:
+            self.embed = TDTEmbedding(d_model, vocab_size)
+        else:
+            self.embed = nn.Embedding(vocab_size, d_model)
         self.pe     = PositionalEncoding(d_model)
         self.layers = nn.ModuleList([
             OptimisedBlock(d_model, n_heads, d_ff, window, compression_rate, dropout)
@@ -178,17 +166,19 @@ class OptimisedCompressiveTransformer(nn.Module):
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, std=0.02)
+            elif isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def enable_gradient_checkpointing(self):
         self._use_grad_ckpt = True
-        print("[vortex] Gradient checkpointing enabled (~40% VRAM reduction)")
 
     def _run_layer(self, layer, x, mem, cache):
         if self._use_grad_ckpt and self.training:
-            from torch.utils.checkpoint import checkpoint
             def fn(x, mem, cache):
                 return layer(x, mem, cache)
-            return checkpoint(fn, x, mem, cache, use_reentrant=False)
+            return grad_checkpoint(fn, x, mem, cache, use_reentrant=False)
         return layer(x, mem, cache)
 
     def forward(self, x: torch.Tensor, memories=None, kv_caches=None):
@@ -208,11 +198,11 @@ class OptimisedCompressiveTransformer(nn.Module):
         return torch.softmax(logits, dim=-1), mems, caches
 
     def vram_estimate_gb(self, batch_size: int, seq_len: int) -> dict:
-        """Rough VRAM breakdown in GB for planning purposes."""
+        """Rough VRAM breakdown in GB."""
         params   = sum(p.numel() for p in self.parameters())
         p_fp16   = params * 2 / 1e9
         p_fp32   = params * 4 / 1e9
-        d_model  = self.embed.embedding_dim
+        d_model  = self.embed.embedding_dim if hasattr(self.embed, "embedding_dim") else self.embed.d_model
         n_layers = len(self.layers)
         acts     = 2 * batch_size * seq_len * d_model * n_layers * 12 / 1e9
         opt      = params * 8 / 1e9
@@ -224,5 +214,74 @@ class OptimisedCompressiveTransformer(nn.Module):
             "total_training_GB":   round(p_fp32 + acts + opt, 2),
             "inference_fp16_GB":   round(p_fp16, 2),
         }
+
+
+class CATWrapper(nn.Module):
+    """Dynamic chunk scheduler for OptimisedCompressiveTransformer.
+
+    During training samples chunk sizes from chunk_sizes uniformly, enabling
+    test-time quality/compute control without retraining.
+    During inference, pass chunk_size= to override.
+    """
+
+    def __init__(self, model: nn.Module,
+                 chunk_sizes: tuple = (128, 256, 512)):
+        super().__init__()
+        self.model       = model
+        self.chunk_sizes = chunk_sizes
+
+    def forward(self, x: torch.Tensor,
+                memories=None, kv_caches=None,
+                chunk_size: int = None):
+        if chunk_size is None:
+            if self.training:
+                chunk_size = random.choice(self.chunk_sizes)
+            else:
+                chunk_size = self.chunk_sizes[-1]
+
+        B, T = x.shape
+
+        if T <= chunk_size:
+            return self.model(x, memories, kv_caches)
+
+        all_logits = []
+        for start in range(0, T, chunk_size):
+            end   = min(start + chunk_size, T)
+            chunk = x[:, start:end]
+            logits, memories, kv_caches = self.model(chunk, memories, kv_caches)
+            memories = [m.detach() if m is not None else None for m in memories]
+            all_logits.append(logits)
+
+        return torch.cat(all_logits, dim=1), memories, kv_caches
+
+    # Convenience proxies so the wrapper is transparent to training code.
+    def enable_gradient_checkpointing(self):
+        self.model.enable_gradient_checkpointing()
+
+    def named_parameters(self, *args, **kwargs):
+        return self.model.named_parameters(*args, **kwargs)
+
+    def parameters(self, *args, **kwargs):
+        return self.model.parameters(*args, **kwargs)
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.model.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def vram_estimate_gb(self, batch_size: int, seq_len: int) -> dict:
+        return self.model.vram_estimate_gb(batch_size, seq_len)
+
+    def state_dict(self, *args, **kwargs):
+        """Delegate to inner model so checkpoints are portable without the wrapper."""
+        return self.model.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Delegate to inner model."""
+        return self.model.load_state_dict(state_dict, strict=strict)
+
 
 

@@ -8,7 +8,10 @@ from collections import deque
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
+from vortex.models.optimized_transformer import (
+    OptimisedCompressiveTransformer,
+    CATWrapper,
+)
 from vortex.data.dataset import make_loaders
 from vortex.utils.training import (cosine_with_warmup, set_lr,
                                    save_checkpoint, load_checkpoint,
@@ -19,6 +22,12 @@ try:
     BASELINES_AVAILABLE = True
 except ImportError:
     BASELINES_AVAILABLE = False
+
+try:
+    import psutil
+    PSUTIL = True
+except ImportError:
+    PSUTIL = False
 
 
 def quick_baselines(data: bytes) -> dict:
@@ -97,7 +106,8 @@ def main():
         torch.backends.cudnn.allow_tf32       = True
     torch.backends.cudnn.benchmark = True
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device   = "cuda" if torch.cuda.is_available() else "cpu"
+    dev_type = device.split(":")[0]  # "cuda:0" -> "cuda"
 
     amp_dtype = get_amp_dtype(device)
     if device == "cuda" and torch.version.hip is not None:
@@ -124,7 +134,14 @@ def main():
         n_layers=m["n_layers"],    n_heads=m["n_heads"],
         d_ff=m["d_ff"],            window=c["window_size"],
         compression_rate=c["compression_rate"], dropout=m["dropout"],
+        use_tdt=m.get("use_tdt", False),
     ).to(device)
+
+    cat_cfg = cfg.get("cat", {})
+    if cat_cfg.get("enabled", False):
+        chunk_sizes = tuple(cat_cfg.get("chunk_sizes", [128, 256, 512]))
+        model = CATWrapper(model, chunk_sizes=chunk_sizes)
+        print(f"  CAT wrapper      : chunk_sizes={chunk_sizes}")
 
     if cfg["training"].get("gradient_checkpointing", False):
         model.enable_gradient_checkpointing()
@@ -140,14 +157,14 @@ def main():
         _dummy = torch.randint(0, 256, (cfg["training"]["batch_size"], cfg["data"]["window_size"]),
                                device=device)
         _mems = None
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
+        with torch.no_grad(), torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
             for _ in range(2):
                 _, _mems, _ = model(_dummy, _mems)
                 _mems = [m.detach() if m is not None else None for m in _mems]
         torch.cuda.synchronize()
         _t0 = time.time()
         _mems = None
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
+        with torch.no_grad(), torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
             for _ in range(5):
                 _, _mems, _ = model(_dummy, _mems)
                 _mems = [m.detach() if m is not None else None for m in _mems]
@@ -165,8 +182,7 @@ def main():
         sys.exit(1)
 
     train_bytes = os.path.getsize(p_cfg["train_data"])
-    try:
-        import psutil
+    if PSUTIL:
         avail_gb  = psutil.virtual_memory().available / 1e9
         train_gb  = train_bytes / 1e9
         streaming = d.get("streaming", False)
@@ -179,8 +195,6 @@ def main():
             print(f"  [WARNING] Forcing streaming=True to avoid OOM kill.\n")
             d["streaming"] = True
         print()
-    except ImportError:
-        pass
 
     train_dl, val_dl = make_loaders(
         p_cfg["train_data"], p_cfg.get("val_data"),
@@ -193,7 +207,7 @@ def main():
         model.parameters(), lr=t["learning_rate"],
         weight_decay=t["weight_decay"], betas=(0.9, 0.999),
     )
-    scaler    = torch.amp.GradScaler("cuda", enabled=(fp16 and amp_dtype == torch.float16))
+    scaler    = torch.amp.GradScaler(dev_type, enabled=(fp16 and amp_dtype == torch.float16))
     stopper   = EarlyStopping(patience=8)
     writer    = SummaryWriter(p_cfg["log_dir"])
     criterion = nn.CrossEntropyLoss()
@@ -235,7 +249,7 @@ def main():
                                        t["max_steps"], max_lr=t["learning_rate"])
             set_lr(optimizer, lr)
 
-            with torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
+            with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                 logits, memories, _ = model(batch, memories)
                 loss = criterion(
                     logits[:, :-1].reshape(-1, m["vocab_size"]),
@@ -281,7 +295,7 @@ def main():
                 with torch.no_grad():
                     for vbatch in val_dl:
                         vbatch = vbatch.to(device)
-                        with torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
+                        with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                             vlogits, val_mems, _ = model(vbatch, val_mems)
                             vloss = criterion(
                                 vlogits[:, :-1].reshape(-1, m["vocab_size"]),
@@ -338,7 +352,7 @@ def main():
             with torch.no_grad():
                 for vbatch in val_dl:
                     vbatch = vbatch.to(device)
-                    with torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
+                    with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                         vlogits, val_mems, _ = model(vbatch, val_mems)
                         vloss = criterion(
                             vlogits[:, :-1].reshape(-1, m["vocab_size"]),

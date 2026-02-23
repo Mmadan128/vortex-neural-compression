@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse, gzip, zlib, lzma, bz2, math, time, yaml
 import torch, torch.nn as nn
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 try:
@@ -25,7 +26,7 @@ except ImportError:
     LZ4 = False
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
-from vortex.data.dataset import make_loaders
+from vortex.data.dataset import MemmapWindowDataset
 from vortex.utils.training import load_checkpoint, get_amp_dtype
 
 
@@ -33,10 +34,20 @@ from vortex.utils.training import load_checkpoint, get_amp_dtype
 SAMPLE_MB = 50
 
 def _read_sample(path: str, max_mb: float = SAMPLE_MB) -> bytes:
-    """Read first N MB from file without loading the whole thing into RAM."""
     max_bytes = int(max_mb * 1024 * 1024)
     with open(path, "rb") as f:
         return f.read(max_bytes)
+
+
+def _make_eval_loader(path: str, window: int, batch_size: int) -> DataLoader:
+    ds = MemmapWindowDataset(path, window=window, stride=window)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+    )
 
 
 def _stats(original: bytes, compressed: bytes, elapsed: float) -> dict:
@@ -101,8 +112,8 @@ def all_baselines(data: bytes) -> list:
 
 
 
-def print_table(rows: list, vortex: dict):
-    gzip6_bpd = next(r["bpd"] for r in rows if "Gzip" in r["name"] and "L6" in r["name"])
+def print_table(rows: list, vortex: dict = None):
+    gzip6_bpd = next((r["bpd"] for r in rows if "Gzip" in r["name"] and "L6" in r["name"]), None)
 
     W = [18, 8, 8, 9, 11, 10]
     sep  = "+" + "+".join("-" * (w + 2) for w in W) + "+"
@@ -116,7 +127,10 @@ def print_table(rows: list, vortex: dict):
     print(sep)
 
     for r in rows:
-        delta = f"{(gzip6_bpd - r['bpd']) / gzip6_bpd * 100:+.1f}%"
+        if gzip6_bpd:
+            delta = f"{(gzip6_bpd - r['bpd']) / gzip6_bpd * 100:+.1f}%"
+        else:
+            delta = "n/a"
         print(fmt_row([
             r["name"],
             f"{r['bpd']:.4f}",
@@ -126,30 +140,33 @@ def print_table(rows: list, vortex: dict):
             delta,
         ]))
 
+    if vortex is not None and vortex["bpd"] != float("inf"):
+        print(sep)
+        v_delta = f"{(gzip6_bpd - vortex['bpd']) / gzip6_bpd * 100:+.1f}%" if gzip6_bpd else "n/a"
+        print(fmt_row([
+            "* Vortex-Codec",
+            f"{vortex['bpd']:.4f}",
+            f"{vortex['ratio_x']:.2f}x",
+            "(theoretical)",
+            "—",
+            v_delta,
+        ]))
     print(sep)
-    v_delta = f"{(gzip6_bpd - vortex['bpd']) / gzip6_bpd * 100:+.1f}%"
-    print(fmt_row([
-        "* Vortex-Codec",
-        f"{vortex['bpd']:.4f}",
-        f"{vortex['ratio_x']:.2f}x",
-        "(theoretical)",
-        "—",
-        v_delta,
-    ]))
-    print(sep)
 
 
 
-def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype, max_tokens=None) -> dict:
+def eval_vortex(model, dl, vocab_size, device, amp_dtype, max_tokens=None) -> dict:
     criterion = nn.CrossEntropyLoss()
     total_nats, total_tokens = 0.0, 0
-    mems = None
+    fp16 = device == "cuda"
+    dev_type = device.split(":")[0]  # "cuda:0" -> "cuda"
 
     with torch.no_grad():
         for batch in tqdm(dl, desc="  Vortex"):
             batch = batch.to(device)
-            with torch.amp.autocast("cuda", enabled=fp16, dtype=amp_dtype):
-                logits, mems, _ = model(batch, mems)
+            # Each window is independent — no meaningful past context across batches.
+            with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
+                logits, _, _ = model(batch, None)
                 loss = criterion(
                     logits[:, :-1].reshape(-1, vocab_size),
                     batch[:, 1:].reshape(-1),
@@ -157,7 +174,6 @@ def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype, max_tokens=None)
             n_tok = batch.size(0) * (batch.size(1) - 1)
             total_nats   += loss.item() * n_tok
             total_tokens += n_tok
-            mems = [mm.detach() if mm is not None else None for mm in mems]
             if max_tokens and total_tokens >= max_tokens:
                 break
 
@@ -171,16 +187,18 @@ def eval_vortex(model, dl, vocab_size, device, fp16, amp_dtype, max_tokens=None)
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",        required=True)
-    p.add_argument("--data",         required=True)
+    p.add_argument("--model",         required=False, default=None)
+    p.add_argument("--data",          required=True)
     p.add_argument("--config",       default="experiments/atlas_experiment/config.yaml")
     p.add_argument("--device",       default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-baselines", action="store_true", help="Skip baseline codecs")
     p.add_argument("--sample-mb",    type=float, default=SAMPLE_MB,
                    help=f"MB of data to use for baselines (default: {SAMPLE_MB})")
-    p.add_argument("--batch-size",   type=int, default=32)
-    p.add_argument("--full-vortex",  action="store_true",
+    p.add_argument("--batch-size",    type=int, default=32)
+    p.add_argument("--full-vortex",   action="store_true",
                    help="Evaluate Vortex on full file; baselines still use --sample-mb")
+    p.add_argument("--baselines-only", action="store_true",
+                   help="Run baseline codecs only, skip Vortex model")
     return p.parse_args()
 
 
@@ -194,7 +212,6 @@ def main():
     exp = cfg.get("experiment", {}).get("name", "experiment")
 
     amp_dtype = get_amp_dtype(args.device)
-    fp16 = args.device == "cuda"
 
     print(f"\n{'='*62}")
     print(f"  Vortex-Codec Compression Benchmark")
@@ -218,12 +235,26 @@ def main():
         if missing:
             print(f"  [INFO] Optional codecs not installed: pip install {' '.join(missing)}\n")
 
+    if args.baselines_only:
+        if baseline_results:
+            print()
+            print_table(baseline_results)
+        else:
+            print("  No baselines run (--no-baselines set).")
+        return
+
+    if not args.model:
+        print("[ERROR] --model is required unless --baselines-only is set.")
+        sys.exit(1)
+
     m, c = cfg["model"], cfg["compressive_memory"]
     model = OptimisedCompressiveTransformer(
-        vocab_size=m["vocab_size"], d_model=m["d_model"],
-        n_layers=m["n_layers"],    n_heads=m["n_heads"],
-        d_ff=m["d_ff"],            window=c["window_size"],
+        vocab_size=m["vocab_size"],       d_model=m["d_model"],
+        n_layers=m["n_layers"],           n_heads=m["n_heads"],
+        d_ff=m["d_ff"],                   window=c["window_size"],
         compression_rate=c["compression_rate"],
+        dropout=m.get("dropout", 0.1),
+        use_tdt=m.get("use_tdt", False),
     ).to(args.device)
     load_checkpoint(model, args.model, device=args.device)
     model.eval()
@@ -231,17 +262,10 @@ def main():
     params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  Model : {params:.1f}M parameters\n")
 
-    dl, _ = make_loaders(
-        args.data,
-        window=c["window_size"],
-        stride=c["window_size"],
-        batch_size=args.batch_size,
-        num_workers=0,
-        streaming=True,
-    )
+    dl = _make_eval_loader(args.data, c["window_size"], args.batch_size)
 
     max_tok = None if args.full_vortex else int(args.sample_mb * 1024 * 1024)
-    vortex = eval_vortex(model, dl, m["vocab_size"], args.device, fp16, amp_dtype, max_tok)
+    vortex = eval_vortex(model, dl, m["vocab_size"], args.device, amp_dtype, max_tok)
 
     print()
     if baseline_results:

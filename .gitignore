@@ -17,3 +17,5 @@ runs/
 *.log
 .DS_Store
 *.tfevents*
+.venv
+docs
