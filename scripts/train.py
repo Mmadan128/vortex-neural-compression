@@ -361,6 +361,11 @@ def main():
                     model, optimizer, step, val_bpd,
                     os.path.join(p_cfg["checkpoint_dir"], ckpt_name),
                 )
+                # Keep latest.pt in sync so auto-resume always works
+                save_checkpoint(
+                    model, optimizer, step, val_bpd,
+                    os.path.join(p_cfg["checkpoint_dir"], "latest.pt"),
+                )
 
                 if stopper.step(val_bpd):
                     print("Early stopping triggered.")
@@ -407,6 +412,12 @@ def main():
                     os.path.join(p_cfg["checkpoint_dir"], "best.pt"),
                 )
                 print(f"  ★ New best: {best_bpd:.4f} BPD\n")
+
+            os.makedirs(p_cfg["checkpoint_dir"], exist_ok=True)
+            save_checkpoint(
+                model, optimizer, step, val_bpd,
+                os.path.join(p_cfg["checkpoint_dir"], "latest.pt"),
+            )
 
             if stopper.step(val_bpd):
                 print("Early stopping triggered.")
