@@ -55,8 +55,8 @@ training:
   batch_size:               256
   grad_accumulation_steps:  1
   learning_rate:            3e-4
-  max_steps:                300000   # ~2.9 epochs; ~5-6 h at expected throughput
-  warmup_steps:             3000
+  max_steps:                50000    # ~0.48 epochs; ~5 h at 2.82 it/s
+  warmup_steps:             500      # 1% of 50k
   grad_clip:                1.0
   weight_decay:             0.01
   mixed_precision:          true
@@ -84,8 +84,9 @@ paths:
 
 evaluation:
   test_data:     experiments/atlas_experiment/data/atlas_test.bin
-  eval_interval: 10000   # every ~26 min at 390 steps/sec
-  eval_batches:  400     # 400 × 256 = 102k jets — robust val estimate
+  eval_interval: 5000    # every ~30 min
+  eval_batches:  400
+  save_interval: 5000
 
 logging:
   log_interval:  100     # less terminal spam at high throughput
