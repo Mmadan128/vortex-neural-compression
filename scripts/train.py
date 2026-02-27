@@ -213,9 +213,18 @@ def main():
     criterion = nn.CrossEntropyLoss()
 
     step, best_bpd = 0, float("inf")
+
+    # Auto-resume from latest.pt if it exists and --resume not explicitly given
+    ckpt_dir = p_cfg.get("checkpoint_dir", "")
+    _auto_latest = os.path.join(ckpt_dir, "latest.pt") if ckpt_dir else ""
+    if not args.resume and os.path.exists(_auto_latest):
+        args.resume = _auto_latest
+        print(f"  [auto-resume] Found {_auto_latest}")
+
     if args.resume:
-        _, best_bpd = load_checkpoint(model, args.resume, optimizer, device)
-        print(f"  Resumed from {args.resume}  (best BPD: {best_bpd:.4f})")
+        step, best_bpd = load_checkpoint(model, args.resume, optimizer, device)
+        print(f"  Resumed from {args.resume}")
+        print(f"  Restored step={step:,}  best_bpd={best_bpd:.4f}")
 
     baselines = {}
     if BASELINES_AVAILABLE and val_dl and p_cfg.get("val_data"):
@@ -328,14 +337,14 @@ def main():
                     best_bpd = val_bpd
                     os.makedirs(p_cfg["checkpoint_dir"], exist_ok=True)
                     save_checkpoint(
-                        model, optimizer, epoch, best_bpd,
+                        model, optimizer, step, best_bpd,
                         os.path.join(p_cfg["checkpoint_dir"], "best.pt"),
                     )
                     print(f"  ★ New best checkpoint saved: {best_bpd:.4f} BPD\n")
 
                 ckpt_name = f"step_{step:07d}.pt"
                 save_checkpoint(
-                    model, optimizer, epoch, val_bpd,
+                    model, optimizer, step, val_bpd,
                     os.path.join(p_cfg["checkpoint_dir"], ckpt_name),
                 )
 
@@ -380,7 +389,7 @@ def main():
                 best_bpd = val_bpd
                 os.makedirs(p_cfg["checkpoint_dir"], exist_ok=True)
                 save_checkpoint(
-                    model, optimizer, epoch, best_bpd,
+                    model, optimizer, step, best_bpd,
                     os.path.join(p_cfg["checkpoint_dir"], "best.pt"),
                 )
                 print(f"  ★ New best: {best_bpd:.4f} BPD\n")

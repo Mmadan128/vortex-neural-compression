@@ -1,0 +1,72 @@
+
+# ============================================================
+# AMD MI300X  —  CAMEL IllustrisTNG  (parallel job 2 of 4)
+# ------------------------------------------------------------
+# Data  : 11 float32 fields/particle (x,y,z, vx,vy,vz,
+#         density, mass, internal_energy, electron_abundance, metallicity)
+#         ~200 MB binary slice → ~20 GB for full CV suite
+# Download:
+#   python experiments/camel_experiment/download.py --all-steps
+#
+# Runs concurrently alongside atlas/era5/ligo jobs on the same GPU.
+# Each job gets ~1/4 of HBM3 bandwidth — throughput ~49 steps/sec.
+# ============================================================
+
+experiment:
+  name: camel_mi300x
+  description: >
+    CAMEL IllustrisTNG cosmological simulation (PartType0 gas particles).
+    25M param model, batch 128, bf16, 500k steps.
+
+model:
+  d_model:    512
+  n_layers:   8
+  n_heads:    8
+  d_ff:       2048
+  dropout:    0.1
+  vocab_size: 256
+  # TDT is critical for CAMEL: electron_abundance is always in [0,1] so
+  # sign byte is always zero — TDT captures this with zero embedding cost.
+  use_tdt:    true
+
+compressive_memory:
+  window_size:      512
+  compression_rate: 4
+
+cat:
+  enabled:     true
+  chunk_sizes: [128, 256, 512]
+
+training:
+  batch_size:               128
+  grad_accumulation_steps:  1
+  learning_rate:            3e-4
+  max_steps:                500000
+  warmup_steps:             5000
+  grad_clip:                1.0
+  weight_decay:             0.01
+  mixed_precision:          true
+  gradient_checkpointing:   false
+  compile_model:            false
+  seed:                     123
+
+data:
+  window_size: 512
+  stride:      256
+  num_workers: 4       # 4 workers per job (20 vCPU shared across 4 jobs)
+  streaming:   true
+
+paths:
+  train_data:     experiments/camel_experiment/data/camel_train.bin
+  val_data:       experiments/camel_experiment/data/camel_val.bin
+  checkpoint_dir: experiments/camel_experiment/checkpoints/
+  log_dir:        experiments/camel_experiment/runs/mi300x/
+
+evaluation:
+  test_data:     experiments/camel_experiment/data/camel_test.bin
+  eval_interval: 5000
+  eval_batches:  200
+
+logging:
+  log_interval:  100
+  save_interval: 10000

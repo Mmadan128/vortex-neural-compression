@@ -5,6 +5,10 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 
+# pin_memory is beneficial for CUDA (PCIe DMA) but can cause shared-memory
+# allocation failures on some ROCm configurations.  Disable it on HIP/ROCm.
+_ON_ROCM = torch.version.hip is not None
+
 
 class MemmapWindowDataset(Dataset):
     """Memory-mapped binary dataset. Never loads the full file into RAM."""
@@ -54,7 +58,7 @@ def make_loaders(train_path: str, val_path: str = None,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=(num_workers > 0),
+        pin_memory=(num_workers > 0 and not _ON_ROCM),
         drop_last=True,
         persistent_workers=(num_workers > 0),
     )
@@ -69,7 +73,7 @@ def make_loaders(train_path: str, val_path: str = None,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=(num_workers > 0),
+            pin_memory=(num_workers > 0 and not _ON_ROCM),
             persistent_workers=(num_workers > 0),
         )
 

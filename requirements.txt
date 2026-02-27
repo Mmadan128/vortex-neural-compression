@@ -1,3 +1,14 @@
+# ---------------------------------------------------------------------------
+# NOTE: Install PyTorch for ROCm (MI300X) BEFORE pip-installing this file.
+#
+#   ROCm 6.x (recommended for MI300X):
+#     pip install torch torchvision torchaudio \
+#         --index-url https://download.pytorch.org/whl/rocm6.2
+#
+#   Optionally install FlashAttention for ROCm (compiled wheel from AMD):
+#     pip install flash-attn  # only if a ROCm-compatible wheel is available;
+#                             # code falls back to PyTorch SDPA if not found.
+# ---------------------------------------------------------------------------
 torch>=2.1.0
 torchac>=0.9.3
 numpy>=1.24.0

@@ -15,19 +15,25 @@ def set_lr(optimizer, lr):
         g["lr"] = lr
 
 
-def save_checkpoint(model, optimizer, epoch, bpd, path):
+def save_checkpoint(model, optimizer, step, bpd, path):
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-    torch.save({"epoch": epoch, "model": model.state_dict(),
+    torch.save({"step": step, "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(), "bpd": bpd}, path)
-    print(f"  [ckpt] Saved -> {path}  (BPD={bpd:.4f})")
+    # Keep latest.pt as a always-current pointer for easy auto-resume
+    latest = os.path.join(os.path.dirname(path), "latest.pt")
+    import shutil as _sh
+    _sh.copy2(path, latest)
+    print(f"  [ckpt] Saved -> {path}  (BPD={bpd:.4f}, step={step:,})")
 
 
 def load_checkpoint(model, path, optimizer=None, device="cpu"):
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     if optimizer and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
-    return ckpt.get("epoch", 0), ckpt.get("bpd", float("inf"))
+    # Support old checkpoints that saved 'epoch' instead of 'step'
+    step = ckpt.get("step", ckpt.get("epoch", 0))
+    return step, ckpt.get("bpd", float("inf"))
 
 
 class EarlyStopping:

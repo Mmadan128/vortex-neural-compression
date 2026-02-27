@@ -64,12 +64,15 @@ class OptimisedCompressiveAttention(nn.Module):
     def _sdpa(self, Q, K, V, causal: bool) -> torch.Tensor:
         """Flash-Attn 2 for causal; PyTorch SDPA otherwise."""
         if FLASH_AVAILABLE and Q.is_cuda and causal:
-            # flash_attn_func expects (B, seqlen, nheads, headdim) in fp16/bf16
+            # flash_attn_func expects (B, seqlen, nheads, headdim) in fp16/bf16.
+            # Preserve original dtype (e.g. bfloat16 on MI300X/ROCm) instead of
+            # hardcoding .half() which silently downcasts bf16 -> fp16.
             dtype = Q.dtype
+            fa_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
             out = flash_attn_func(
-                Q.transpose(1, 2).half(),
-                K.transpose(1, 2).half(),
-                V.transpose(1, 2).half(),
+                Q.transpose(1, 2).to(fa_dtype),
+                K.transpose(1, 2).to(fa_dtype),
+                V.transpose(1, 2).to(fa_dtype),
                 dropout_p=self.dropout if self.training else 0.0,
                 causal=True,
             ).to(dtype).transpose(1, 2)

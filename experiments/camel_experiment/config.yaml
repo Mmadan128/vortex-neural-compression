@@ -1,0 +1,60 @@
+experiment:
+  name: camel_experiment
+  description: >
+    Byte-level neural compression on CAMEL IllustrisTNG gas particle data.
+    CV set (27 simulations, snap_033 z=0), ~10 GB, 44 bytes/particle.
+    80/10/10 train/val/test split.
+    Source: https://users.flatironinstitute.org/~camels/
+
+model:
+  d_model:    512
+  n_layers:   8
+  n_heads:    8
+  d_ff:       2048
+  dropout:    0.1
+  vocab_size: 256
+  # TDT: IEEE-754 float32 binary. Gas fields (density, xe, Z) have
+  # strong exponent-byte clustering → typed tables exploit this well.
+  use_tdt: true
+
+compressive_memory:
+  window_size:      512
+  compression_rate: 4
+
+cat:
+  enabled:     true
+  chunk_sizes: [128, 256, 512]
+
+training:
+  batch_size:               6
+  grad_accumulation_steps:  8
+  learning_rate:            3e-4
+  max_steps:                300000
+  warmup_steps:             6000
+  grad_clip:                1.0
+  weight_decay:             0.01
+  mixed_precision:          true
+  gradient_checkpointing:   true
+  compile_model:            false
+  seed:                     42
+
+data:
+  window_size: 512
+  stride:      256
+  num_workers: 4
+  streaming:   false
+
+paths:
+  train_data:     experiments/camel_experiment/data/camel_train.bin
+  val_data:       experiments/camel_experiment/data/camel_val.bin
+  checkpoint_dir: experiments/camel_experiment/checkpoints/
+  log_dir:        experiments/camel_experiment/runs/
+
+evaluation:
+  test_data:      experiments/camel_experiment/data/camel_test.bin
+  eval_interval:  2000
+  eval_batches:   200
+
+logging:
+  log_interval:  100
+  save_interval: 10000

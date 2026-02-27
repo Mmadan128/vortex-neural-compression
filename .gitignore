@@ -1,21 +1,56 @@
+# --- Python ---
 __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
 build/
 .env
+.venv/
+
+# --- Model checkpoints & weights ---
 *.pt
 *.pth
+*.ckpt
+*.safetensors
+model/
+
+# --- Data files (all formats) ---
 *.bin
 *.vxc
 *.h5
+*.hdf5
 *.npz
+*.npy
+*.csv
+*.parquet
+*.fits
+*.nc
+*.zarr
+
+# --- Experiment artefacts ---
 experiments/*/data/
 experiments/*/checkpoints/
 experiments/*/runs/
 runs/
+
+# --- Logs & TensorBoard ---
 *.log
-.DS_Store
 *.tfevents*
-.venv
-docs
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Docs build (keep source, ignore rendered) ---
+docs/_build/
+docs/paper/*.pdf
+docs/paper/*.aux
+docs/paper/*.bbl
+docs/paper/*.blg
+docs/paper/*.out
+docs/paper/*.toc
+docs/paper/*.fls
+docs/paper/*.fdb_latexmk
+docs/paper/*.synctex.gz

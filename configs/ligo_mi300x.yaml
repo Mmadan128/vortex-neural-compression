@@ -1,0 +1,72 @@
+
+# ============================================================
+# AMD MI300X  —  LIGO O3 Gravitational Wave Strain  (parallel job 4 of 4)
+# ------------------------------------------------------------
+# Data  : LIGO/Virgo O3 strain, float32, 4096 Hz.
+#         ~120 MB per 1-hour segment (H1 or L1 interferometer).
+# Download (no registration required):
+#   python experiments/ligo_experiment/download.py --all-steps
+#   # or manually:  https://gwosc.org/
+#
+# Small model: 3M params, 0.3 GB VRAM — barely visible in 192 GB.
+# LTE's importance scorer is expected to naturally focus memory budget on
+# non-Gaussian noise transients ('glitches') — a natural test of content-
+# adaptive eviction.
+# ============================================================
+
+experiment:
+  name: ligo_mi300x
+  description: >
+    LIGO O3 gravitational wave strain (univariate float32 time series).
+    3M param model, batch 64, bf16, 300k steps.
+
+model:
+  d_model:    256
+  n_layers:   4
+  n_heads:    4
+  d_ff:       1024
+  dropout:    0.1
+  vocab_size: 256
+  use_tdt:    true
+
+compressive_memory:
+  window_size:      512
+  compression_rate: 4
+
+cat:
+  enabled:     true
+  chunk_sizes: [128, 256, 512]
+
+training:
+  batch_size:               64
+  grad_accumulation_steps:  1
+  learning_rate:            3e-4
+  max_steps:                300000
+  warmup_steps:             3000
+  grad_clip:                1.0
+  weight_decay:             0.01
+  mixed_precision:          true
+  gradient_checkpointing:   false
+  compile_model:            false
+  seed:                     789
+
+data:
+  window_size: 512
+  stride:      256
+  num_workers: 4
+  streaming:   true
+
+paths:
+  train_data:     experiments/ligo_experiment/data/ligo_train.bin
+  val_data:       experiments/ligo_experiment/data/ligo_val.bin
+  checkpoint_dir: experiments/ligo_experiment/checkpoints/
+  log_dir:        experiments/ligo_experiment/runs/mi300x/
+
+evaluation:
+  test_data:     experiments/ligo_experiment/data/ligo_test.bin
+  eval_interval: 5000
+  eval_batches:  200
+
+logging:
+  log_interval:  100
+  save_interval: 10000

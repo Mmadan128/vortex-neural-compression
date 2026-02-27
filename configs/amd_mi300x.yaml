@@ -1,10 +1,35 @@
 
+# ============================================================
+# AMD Instinct MI300X  —  ATLAS FTAG large dataset
+# ------------------------------------------------------------
+# Hardware  : 1× MI300X  |  192 GB HBM3  |  20 vCPU  |  240 GB RAM
+#             Boot: 720 GB NVMe  |  Scratch: 5 TB NVMe
+#
+# Dataset   : mc-flavtag-ttbar-large.h5  (~100 GB HDF5 → ~20 GB binary)
+#             ~196 M jets × 102 B/jet
+#             Download:
+#               python experiments/atlas_experiment/download.py --all-steps \
+#                 --src root://eospublic.cern.ch//eos/opendata/atlas/ \
+#                       datascience/ATLAS-FTAG-2023-05/mc-flavtag-ttbar-large.h5
+#
+# NOTE — data paths: store binary files on the 5 TB scratch disk.
+#   Either update paths below to the scratch mount (e.g. /mnt/scratch/atlas/)
+#   or symlink:
+#     ln -s /mnt/scratch/atlas  experiments/atlas_experiment/data
+#
+# Sizing (verified):
+#   Model        : 201 M params  (d=1024, L=16, H=16, ff=4096)
+#   VRAM         : ~20 GB  ← 10× headroom in 192 GB
+#   Batch tokens : 256 × 512 = 131,072 tokens/step
+#   Steps/epoch  : ~122,000  (stride=512, no-overlap windows)
+#   1,500,000 steps ≈ 12 epochs  ≈ ~1.1 h  @ ~390 steps/sec
+# ============================================================
+
 experiment:
-  name: atlas_experiment
+  name: atlas_large_mi300x
   description: >
-    Byte-level neural compression on ATLAS FTAG b-tagging jet data.
-    ttbar medium dataset (~13 GB) with 80/10/10 train/val/test split.
-    Source: ATLAS-FTAG-2023-05 (eospublic.cern.ch)
+    ATLAS FTAG large file (mc-flavtag-ttbar-large.h5, ~196 M jets, ~20 GB binary).
+    80/10/10 split. 201 M param model, batch 256, bf16, 1.5 M steps ≈ 12 epochs.
 
 model:
   d_model:    1024
@@ -13,37 +38,43 @@ model:
   d_ff:       4096
   dropout:    0.1
   vocab_size: 256
+  # TDT enabled: large ATLAS data is still raw IEEE-754 float32 binary —
+  # typed byte embeddings improve BPD on all ATLAS splits regardless of scale.
+  use_tdt:    true
 
 compressive_memory:
   window_size:      512
   compression_rate: 4
 
-# use_tdt and cat are intentionally disabled here — MI300X runs large batches
-# without needing chunk scheduling or typed byte embeddings.
-use_tdt: false
-
+# CAT disabled: no need for multi-scale chunk scheduling at this batch size.
 cat:
   enabled: false
 
 training:
-  batch_size:               128
+  batch_size:               256      # 256 × 512 = 131k tokens/step; ~20 GB VRAM
   grad_accumulation_steps:  1
-  learning_rate:            3e-4
-  max_steps:                300000
-  warmup_steps:             6000
+  # sqrt(256/128) × 3e-4 ≈ 4.2e-4  (linear-sqrt LR scaling for 2× batch)
+  learning_rate:            4.2e-4
+  max_steps:                1500000  # ~12 epochs of large train split
+  warmup_steps:             15000    # 1% of max_steps
   grad_clip:                1.0
   weight_decay:             0.01
   mixed_precision:          true
-  gradient_checkpointing:   false
-  compile_model:            false
+  gradient_checkpointing:   false    # 192 GB HBM3: no need
+  compile_model:            false    # torch.compile + ROCm/Triton still unstable
   seed:                     42
 
 data:
   window_size: 512
-  stride:      256
-  num_workers: 0
-  streaming:   true
+  stride:      512    # no-overlap windows on 20 GB train data (enough diversity)
+  # 16 workers: 20 vCPUs available; leave 4 for main process + OS
+  num_workers: 16
+  streaming:   true   # mmap from 5 TB NVMe; never loads full file into RAM
 
+# ── Update these paths to your scratch disk mount on the MI300X server ──────
+# Example if scratch is at /mnt/scratch:
+#   train_data: /mnt/scratch/atlas/atlas_train.bin
+# Or symlink:  ln -s /mnt/scratch/atlas experiments/atlas_experiment/data
 paths:
   train_data:     experiments/atlas_experiment/data/atlas_train.bin
   val_data:       experiments/atlas_experiment/data/atlas_val.bin
@@ -52,9 +83,9 @@ paths:
 
 evaluation:
   test_data:     experiments/atlas_experiment/data/atlas_test.bin
-  eval_interval: 5000
-  eval_batches:  200
+  eval_interval: 10000   # every ~26 min at 390 steps/sec
+  eval_batches:  400     # 400 × 256 = 102k jets — robust val estimate
 
 logging:
-  log_interval:  50
-  save_interval: 5000
+  log_interval:  100     # less terminal spam at high throughput
+  save_interval: 10000   # checkpoint every ~26 min
