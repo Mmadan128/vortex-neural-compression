@@ -312,8 +312,11 @@ def main():
             if step > 0 and step % eval_interval == 0 and val_dl:
                 model.eval()
                 val_nats, val_tokens, val_mems = 0.0, 0, None
+                eval_batches = cfg.get("evaluation", {}).get("eval_batches", 50)
                 with torch.no_grad():
-                    for vbatch in val_dl:
+                    for _eval_i, vbatch in enumerate(val_dl):
+                        if _eval_i >= eval_batches:
+                            break
                         vbatch = vbatch.to(device)
                         with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                             vlogits, val_mems, _ = model(vbatch, val_mems)
