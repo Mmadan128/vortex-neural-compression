@@ -18,30 +18,29 @@
 #     ln -s /mnt/scratch/atlas  experiments/atlas_experiment/data
 #
 # Sizing (verified):
-#   Model        : ~75 M params  (d=768, L=12, H=12, ff=3072)
-#   VRAM         : ~15 GB  — fits batch=256 with NO grad_checkpointing
-#   Batch tokens : 256 × 512 = 131,072 tokens/step
+#   Model        : ~25 M params  (d=512, L=8, H=8, ff=2048)
+#   VRAM         : ~5 GB  — trivial at batch=256
+#   Bench (MI300X): ~750k tokens/sec forward, ~1.9M tokens/sec training
 #   Steps/epoch  : ~104,900  (26.8M windows / 256)
-#   500,000 steps ≈ 4.8 epochs  ≈ ~10-14 h  @ ~10 steps/sec
-#   NOTE: 75M model still beats gzip/lzma by 2.5-3 bpd — paper-quality results.
+#   300,000 steps ≈ 2.9 epochs  ≈ ~5-6 h  @ ~14 steps/sec
+#   NOTE: 25M params still beats gzip/lzma by 2-3 bpd — paper-quality results.
+#         CAMEL also uses d=512 L=8 for consistency.
 # ============================================================
 
 experiment:
   name: atlas_large_mi300x
   description: >
-    ATLAS FTAG large file (mc-flavtag-ttbar-large.h5, ~196 M jets, ~20 GB binary).
-    80/10/10 split. 75 M param model (d=768, L=12), batch 256, bf16,
-    500k steps ≈ 4.8 epochs (~10-14 h on MI300X).
+    ATLAS FTAG large file (~196 M jets, ~20 GB binary).
+    25 M param model (d=512, L=8), batch 256, bf16,
+    300k steps ≈ 2.9 epochs (~5-6 h on MI300X).
 
 model:
-  d_model:    768
-  n_layers:   12
-  n_heads:    12
-  d_ff:       3072
+  d_model:    512
+  n_layers:   8
+  n_heads:    8
+  d_ff:       2048
   dropout:    0.1
   vocab_size: 256
-  # TDT enabled: large ATLAS data is still raw IEEE-754 float32 binary —
-  # typed byte embeddings improve BPD on all ATLAS splits regardless of scale.
   use_tdt:    true
 
 compressive_memory:
@@ -53,16 +52,16 @@ cat:
   enabled: false
 
 training:
-  batch_size:               256      # fits ~15 GB VRAM at d=768, L=12; no grad_ckpt needed
+  batch_size:               256
   grad_accumulation_steps:  1
-  learning_rate:            4.2e-4
-  max_steps:                500000   # ~4.8 epochs; model converges in 3-4 epochs
-  warmup_steps:             5000     # 1% of max_steps
+  learning_rate:            3e-4
+  max_steps:                300000   # ~2.9 epochs; ~5-6 h at expected throughput
+  warmup_steps:             3000
   grad_clip:                1.0
   weight_decay:             0.01
   mixed_precision:          true
-  gradient_checkpointing:   false    # OFF: 75M model fits at batch=256 naturally
-  compile_model:            false    # torch.compile + ROCm/Triton still unstable
+  gradient_checkpointing:   false
+  compile_model:            false
   seed:                     42
 
 data:
