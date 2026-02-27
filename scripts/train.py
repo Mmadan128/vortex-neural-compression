@@ -243,7 +243,9 @@ def main():
     recent_bpds   = deque(maxlen=20)
     train_bpd_ema = None
     t0            = time.time()
-    epoch         = 0
+    # Derive epoch from step so set_epoch() doesn't repeat shuffle order on resume
+    steps_per_epoch = max(1, len(train_dl))
+    epoch         = step // steps_per_epoch
 
     memories = None
     while step < t["max_steps"]:
