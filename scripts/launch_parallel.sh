@@ -68,6 +68,23 @@ else
   JOBS=(atlas camel)
 fi
 
+# ── Guard: abort if any requested job is already running ─────────────────────
+for JOB in "${JOBS[@]}"; do
+  for PIDFILE in logs/parallel_*/"${JOB}.pid"; do
+    [[ -f "$PIDFILE" ]] || continue
+    RUNNING_PID=$(cat "$PIDFILE" 2>/dev/null) || continue
+    if kill -0 "$RUNNING_PID" 2>/dev/null; then
+      echo ""
+      echo "[ERROR] Job '$JOB' is already running (PID $RUNNING_PID, pidfile $PIDFILE)."
+      echo "        To stop it:  kill $RUNNING_PID"
+      echo "        To stop all: kill \$(cat logs/parallel_*/${JOB}.pid) 2>/dev/null"
+      echo "        Refusing to launch a second instance to avoid GPU contention."
+      echo ""
+      exit 1
+    fi
+  done
+done
+
 # ── Launch (nohup — survives SSH disconnect) ──────────────────────────────────
 declare -A PIDS
 
