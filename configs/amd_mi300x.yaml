@@ -19,10 +19,11 @@
 #
 # Sizing (verified):
 #   Model        : 201 M params  (d=1024, L=16, H=16, ff=4096)
-#   VRAM         : ~20 GB  ← 10× headroom in 192 GB
-#   Batch tokens : 256 × 512 = 131,072 tokens/step
+#   VRAM         : ~45-60 GB  (BF16 activations dominate at large batch)
+#   Effective batch: 32 × 8 accum = 256 tokens/step (unchanged from original)
+#   Batch tokens : 32 × 512 = 16,384 tokens/step (per physical step)
 #   Steps/epoch  : ~122,000  (stride=512, no-overlap windows)
-#   1,500,000 steps ≈ 12 epochs  ≈ ~1.1 h  @ ~390 steps/sec
+#   1,500,000 steps ≈ 12 epochs  ≈ ~2-3 h  @ ~130 steps/sec (grad_accum overhead)
 # ============================================================
 
 experiment:
@@ -51,24 +52,24 @@ cat:
   enabled: false
 
 training:
-  batch_size:               256      # 256 × 512 = 131k tokens/step; ~20 GB VRAM
-  grad_accumulation_steps:  1
-  # sqrt(256/128) × 3e-4 ≈ 4.2e-4  (linear-sqrt LR scaling for 2× batch)
+  batch_size:               32       # physical batch; attentions = 32×16×512×512 ~ manageable
+  grad_accumulation_steps:  8        # effective batch = 32 × 8 = 256 (unchanged)
+  # sqrt(256/128) × 3e-4 ≈ 4.2e-4  (lr based on effective batch, not physical)
   learning_rate:            4.2e-4
   max_steps:                1500000  # ~12 epochs of large train split
   warmup_steps:             15000    # 1% of max_steps
   grad_clip:                1.0
   weight_decay:             0.01
   mixed_precision:          true
-  gradient_checkpointing:   false    # 192 GB HBM3: no need
+  gradient_checkpointing:   true     # recompute activations; halves peak VRAM
   compile_model:            false    # torch.compile + ROCm/Triton still unstable
   seed:                     42
 
 data:
   window_size: 512
   stride:      512    # no-overlap windows on 20 GB train data (enough diversity)
-  # 16 workers: 20 vCPUs available; leave 4 for main process + OS
-  num_workers: 16
+  # 8 workers: reduce prefetch pressure; 16 was over-provisioned vs batch=32
+  num_workers: 8
   streaming:   true   # mmap from 5 TB NVMe; never loads full file into RAM
 
 # ── Update these paths to your scratch disk mount on the MI300X server ──────
