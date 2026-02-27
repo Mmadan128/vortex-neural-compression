@@ -106,7 +106,7 @@ for JOB in "${JOBS[@]}"; do
 
   echo "[launch] Starting job '$JOB'  config=$CONFIG"
   echo "         log -> $LOG"
-  nohup python scripts/train.py --config "$CONFIG" > "$LOG" 2>&1 &
+  nohup python -u scripts/train.py --config "$CONFIG" > "$LOG" 2>&1 &
   PIDS[$JOB]=$!
   echo "${PIDS[$JOB]}" > "${LOG%.log}.pid"
 done

@@ -80,7 +80,7 @@ def print_scoreboard(step: int, train_bpd: float, val_bpd: float,
         f"  Elapsed : {elapsed_h:.1f}h  │  ETA : {eta_h:.1f}h",
         f"{'─'*54}\n",
     ]
-    print("\n".join(lines))
+    print("\n".join(lines), flush=True)
 
 
 def parse_args():
