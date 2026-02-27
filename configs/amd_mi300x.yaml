@@ -84,7 +84,7 @@ paths:
 
 evaluation:
   test_data:     experiments/atlas_experiment/data/atlas_test.bin
-  eval_interval: 5000    # every ~30 min
+  eval_interval: 1000    # every ~6 min — check train/val gap early
   eval_batches:  400
   save_interval: 5000
 
