@@ -55,8 +55,8 @@ training:
   batch_size:               256
   grad_accumulation_steps:  1
   learning_rate:            3e-4
-  max_steps:                50000    # ~0.48 epochs; ~5 h at 2.82 it/s
-  warmup_steps:             500      # 1% of 50k
+  max_steps:                210000   # ~2 epochs (2×104,898); ~13.5h at 4.31 it/s
+  warmup_steps:             500      # resumes from step 5000 — warmup already done
   grad_clip:                1.0
   weight_decay:             0.01
   mixed_precision:          true
