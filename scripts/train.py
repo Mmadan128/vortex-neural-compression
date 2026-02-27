@@ -252,7 +252,9 @@ def main():
         if hasattr(train_dl.sampler, "set_epoch"):
             train_dl.sampler.set_epoch(epoch)
         model.train()
+        steps_left = t["max_steps"] - step
         pbar = tqdm(train_dl, desc=f"Epoch {epoch}",
+                    total=min(len(train_dl), steps_left),
                     dynamic_ncols=True, leave=True)
         optimizer.zero_grad(set_to_none=True)
 
