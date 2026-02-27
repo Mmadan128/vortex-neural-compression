@@ -86,8 +86,9 @@ SNAP_DEFAULT = 33   # z = 0 (present day)
 
 
 def snapshot_url(sim_set: str, sim_idx: int, snap: int) -> str:
+    # FlatIron uses snap_NNN.hdf5 (not snapshot_NNN.hdf5)
     return (f"{BASE_URL}/{SUITE}/{sim_set}/{sim_set}_{sim_idx}"
-            f"/snapshot_{snap:03d}.hdf5")
+            f"/snap_{snap:03d}.hdf5")
 
 
 def local_h5(sim_set: str, sim_idx: int, snap: int) -> str:
