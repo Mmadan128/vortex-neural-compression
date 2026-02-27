@@ -49,13 +49,27 @@ class ChunkShuffleSampler(Sampler):
 
 
 class MemmapWindowDataset(Dataset):
-    """Memory-mapped binary dataset. Never loads the full file into RAM."""
+    """Memory-mapped binary dataset. Never loads the full file into RAM.
 
-    def __init__(self, path: str, window: int = 512, stride: int = 256):
+    If preload=True, the entire file is loaded into a RAM numpy array at init
+    (takes ~3-5 sec for 14 GB). All subsequent reads are pure in-RAM — zero
+    storage I/O during training. Recommended on machines with >=32 GB free RAM.
+    """
+
+    def __init__(self, path: str, window: int = 512, stride: int = 256,
+                 preload: bool = False):
         self.path      = path
         self.window    = window
         self.stride    = stride
-        self.data      = np.memmap(path, dtype=np.uint8, mode="r")
+        mm             = np.memmap(path, dtype=np.uint8, mode="r")
+        if preload:
+            print(f"  [dataset] preloading {os.path.getsize(path)/1e9:.2f} GB into RAM ...",
+                  end=" ", flush=True)
+            self.data = np.array(mm)  # copies entire file into RAM
+            del mm
+            print("done")
+        else:
+            self.data = mm
         n              = len(self.data)
         self.n_windows = max(0, math.ceil((n - window) / stride) + 1) if n >= window else 0
 
@@ -80,10 +94,10 @@ class MemmapWindowDataset(Dataset):
 def make_loaders(train_path: str, val_path: str = None,
                  window: int = 512, stride: int = 256,
                  batch_size: int = 32, num_workers: int = 4,
-                 streaming: bool = False):
+                 streaming: bool = False, preload: bool = False):
     """Returns (train_dataloader, val_dataloader | None)."""
 
-    train_ds = MemmapWindowDataset(train_path, window, stride)
+    train_ds = MemmapWindowDataset(train_path, window, stride, preload=preload)
 
     print(f"  [dataset] train  : {len(train_ds):,} windows  "
           f"({os.path.getsize(train_path)/1e9:.2f} GB  mmap)")
@@ -103,7 +117,7 @@ def make_loaders(train_path: str, val_path: str = None,
 
     val_dl = None
     if val_path and os.path.exists(val_path):
-        val_ds = MemmapWindowDataset(val_path, window, window)
+        val_ds = MemmapWindowDataset(val_path, window, window, preload=preload)
         print(f"  [dataset] val    : {len(val_ds):,} windows  "
               f"({os.path.getsize(val_path)/1e9:.2f} GB  mmap)")
         val_dl = DataLoader(

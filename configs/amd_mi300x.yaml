@@ -69,7 +69,9 @@ data:
   window_size: 512
   stride:      512    # no-overlap windows on 20 GB train data (enough diversity)
   num_workers: 16     # 16 workers to keep batch=256 fed; 20 vCPUs avail
-  streaming:   true   # mmap from NVMe; never loads full file into RAM
+  streaming:   false  # preload=true loads entire file into RAM; streaming mmap not needed
+  preload:     true   # load 13.75 GB train + 1.72 GB val into RAM at startup (~5 sec)
+                      # eliminates ALL storage I/O during training — use on 240 GB RAM MI300X
 
 # ── Update these paths to your scratch disk mount on the MI300X server ──────
 # Example if scratch is at /mnt/scratch:

@@ -201,6 +201,7 @@ def main():
         window=d["window_size"], stride=d["stride"],
         batch_size=t["batch_size"], num_workers=d["num_workers"],
         streaming=d.get("streaming", False),
+        preload=d.get("preload", False),
     )
 
     optimizer = torch.optim.AdamW(

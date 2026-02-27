@@ -54,7 +54,8 @@ data:
   window_size: 512
   stride:      256
   num_workers: 4       # 4 workers per job (20 vCPU shared across 4 jobs)
-  streaming:   true
+  streaming:   false
+  preload:     true    # load ~15 GB camel_train.bin into RAM; 240 GB avail, no issue
 
 paths:
   train_data:     experiments/camel_experiment/data/camel_train.bin
