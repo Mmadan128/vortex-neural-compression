@@ -25,7 +25,7 @@ try:
 except ImportError:
     LZ4 = False
 
-from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
+from vortex.models.optimized_transformer import OptimisedCompressiveTransformer, CATWrapper
 from vortex.data.dataset import MemmapWindowDataset
 from vortex.utils.training import load_checkpoint, get_amp_dtype
 
@@ -199,6 +199,8 @@ def parse_args():
                    help="Evaluate Vortex on full file; baselines still use --sample-mb")
     p.add_argument("--baselines-only", action="store_true",
                    help="Run baseline codecs only, skip Vortex model")
+    p.add_argument("--out-json", default=None, metavar="PATH",
+                   help="Save all results to a JSON file (for paper tables)")
     return p.parse_args()
 
 
@@ -248,7 +250,7 @@ def main():
         sys.exit(1)
 
     m, c = cfg["model"], cfg["compressive_memory"]
-    model = OptimisedCompressiveTransformer(
+    _base = OptimisedCompressiveTransformer(
         vocab_size=m["vocab_size"],       d_model=m["d_model"],
         n_layers=m["n_layers"],           n_heads=m["n_heads"],
         d_ff=m["d_ff"],                   window=c["window_size"],
@@ -256,6 +258,15 @@ def main():
         dropout=m.get("dropout", 0.1),
         use_tdt=m.get("use_tdt", False),
     ).to(args.device)
+
+    cat_cfg = cfg.get("cat", {})
+    if cat_cfg.get("enabled", False):
+        chunk_sizes = tuple(cat_cfg.get("chunk_sizes", [128, 256, 512]))
+        model = CATWrapper(_base, chunk_sizes=chunk_sizes).to(args.device)
+        print(f"  CAT wrapper: chunk_sizes={chunk_sizes}")
+    else:
+        model = _base
+
     load_checkpoint(model, args.model, device=args.device)
     model.eval()
 
@@ -296,6 +307,37 @@ def main():
         print(f"\n  vs best baseline ({best['name'].strip()}: {best['bpd']:.4f} BPD)"
               f"  -> Vortex {delta:+.1f}%")
     print(f"{'='*62}\n")
+
+    # ── Save JSON for paper tables ─────────────────────────────────────────
+    if args.out_json:
+        import json, datetime
+        record = {
+            "experiment": exp,
+            "test_file":  args.data,
+            "test_size_gb": data_size_gb,
+            "model": args.model,
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "vortex": {
+                "bpd":     round(vortex["bpd"], 6),
+                "ratio_x": round(vortex["ratio_x"], 4),
+            },
+            "baselines": [
+                {
+                    "name":      r["name"].strip(),
+                    "bpd":       round(r["bpd"], 6),
+                    "ratio_x":   round(r["ratio_x"], 4),
+                    "speed_mbs": round(r["speed_mbs"], 2),
+                    "vs_vortex_pct": round(
+                        (r["bpd"] - vortex["bpd"]) / r["bpd"] * 100, 2
+                    ),
+                }
+                for r in baseline_results
+            ],
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(args.out_json)), exist_ok=True)
+        with open(args.out_json, "w") as jf:
+            json.dump(record, jf, indent=2)
+        print(f"  [json] Results saved -> {args.out_json}")
 
 
 if __name__ == "__main__":
