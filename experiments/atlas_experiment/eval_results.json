@@ -1,0 +1,160 @@
+{
+  "experiment": "atlas_experiment",
+  "test_file": "experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin",
+  "test_size_gb": 2.615028774,
+  "model": "/home/mm/projects/vortex_codec_final/model/best.pt",
+  "timestamp": "2026-03-04T17:06:29.892183Z",
+  "vortex": {
+    "bpd": 3.396606,
+    "ratio_x": 2.3553,
+    "elapsed_s": 1696.87,
+    "speed_mbs": 0.31,
+    "data_mb": 524.3
+  },
+  "baselines": [
+    {
+      "name": "Gzip  (L1)",
+      "bpd": 5.267443,
+      "ratio_x": 1.5188,
+      "elapsed_s": 2.392,
+      "speed_mbs": 87.67,
+      "vs_vortex_pct": 35.52
+    },
+    {
+      "name": "Gzip  (L6)",
+      "bpd": 5.016763,
+      "ratio_x": 1.5947,
+      "elapsed_s": 3.227,
+      "speed_mbs": 64.99,
+      "vs_vortex_pct": 32.29
+    },
+    {
+      "name": "Gzip  (L9)",
+      "bpd": 4.959048,
+      "ratio_x": 1.6132,
+      "elapsed_s": 11.588,
+      "speed_mbs": 18.1,
+      "vs_vortex_pct": 31.51
+    },
+    {
+      "name": "Zlib  (L1)",
+      "bpd": 5.267443,
+      "ratio_x": 1.5188,
+      "elapsed_s": 2.56,
+      "speed_mbs": 81.91,
+      "vs_vortex_pct": 35.52
+    },
+    {
+      "name": "Zlib  (L6)",
+      "bpd": 5.016763,
+      "ratio_x": 1.5947,
+      "elapsed_s": 3.538,
+      "speed_mbs": 59.28,
+      "vs_vortex_pct": 32.29
+    },
+    {
+      "name": "Zlib  (L9)",
+      "bpd": 4.959048,
+      "ratio_x": 1.6132,
+      "elapsed_s": 11.19,
+      "speed_mbs": 18.74,
+      "vs_vortex_pct": 31.51
+    },
+    {
+      "name": "Bz2   (L1)",
+      "bpd": 5.048363,
+      "ratio_x": 1.5847,
+      "elapsed_s": 9.1,
+      "speed_mbs": 23.04,
+      "vs_vortex_pct": 32.72
+    },
+    {
+      "name": "Bz2   (L9)",
+      "bpd": 4.946885,
+      "ratio_x": 1.6172,
+      "elapsed_s": 9.136,
+      "speed_mbs": 22.95,
+      "vs_vortex_pct": 31.34
+    },
+    {
+      "name": "LZMA  (P6)",
+      "bpd": 4.743568,
+      "ratio_x": 1.6865,
+      "elapsed_s": 69.791,
+      "speed_mbs": 3.0,
+      "vs_vortex_pct": 28.4
+    },
+    {
+      "name": "LZMA  (P9)",
+      "bpd": 4.729629,
+      "ratio_x": 1.6915,
+      "elapsed_s": 84.948,
+      "speed_mbs": 2.47,
+      "vs_vortex_pct": 28.18
+    },
+    {
+      "name": "Zstd  (L1)",
+      "bpd": 4.980486,
+      "ratio_x": 1.6063,
+      "elapsed_s": 0.326,
+      "speed_mbs": 643.44,
+      "vs_vortex_pct": 31.8
+    },
+    {
+      "name": "Zstd  (L3)",
+      "bpd": 4.980706,
+      "ratio_x": 1.6062,
+      "elapsed_s": 0.546,
+      "speed_mbs": 383.83,
+      "vs_vortex_pct": 31.8
+    },
+    {
+      "name": "Zstd  (L9)",
+      "bpd": 4.873229,
+      "ratio_x": 1.6416,
+      "elapsed_s": 1.844,
+      "speed_mbs": 113.71,
+      "vs_vortex_pct": 30.3
+    },
+    {
+      "name": "Zstd  (L19)",
+      "bpd": 4.889359,
+      "ratio_x": 1.6362,
+      "elapsed_s": 38.003,
+      "speed_mbs": 5.52,
+      "vs_vortex_pct": 30.53
+    },
+    {
+      "name": "Brotli(Q 1)",
+      "bpd": 5.092982,
+      "ratio_x": 1.5708,
+      "elapsed_s": 0.607,
+      "speed_mbs": 345.56,
+      "vs_vortex_pct": 33.31
+    },
+    {
+      "name": "Brotli(Q 6)",
+      "bpd": 4.848651,
+      "ratio_x": 1.6499,
+      "elapsed_s": 2.984,
+      "speed_mbs": 70.28,
+      "vs_vortex_pct": 29.95
+    },
+    {
+      "name": "Brotli(Q11)",
+      "bpd": 4.720914,
+      "ratio_x": 1.6946,
+      "elapsed_s": 304.191,
+      "speed_mbs": 0.69,
+      "vs_vortex_pct": 28.05
+    },
+    {
+      "name": "LZ4   (default)",
+      "bpd": 5.626019,
+      "ratio_x": 1.422,
+      "elapsed_s": 0.198,
+      "speed_mbs": 1057.43,
+      "vs_vortex_pct": 39.63
+    }
+  ]
+}

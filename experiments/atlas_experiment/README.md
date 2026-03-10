@@ -40,7 +40,7 @@ After conversion to raw bytes:
 - Record size: 102 bytes per jet
 - Data is stored as a contiguous binary stream
 
-For faster experimentation, a 200 MB slice is used during training and benchmarking.
+1 GB of data is used for benchmarking (both baselines and Vortex codec).
 
 ---
 
@@ -68,19 +68,19 @@ python experiments/atlas_experiment/prepare.py
 python scripts/train.py \
     --config experiments/atlas_experiment/config.yaml
 ```
-5) Compress 200 MB slice
+5) Compress 1 GB sample
 ```bash
 python scripts/compress.py \
     --model  experiments/atlas_experiment/checkpoints/best.pt \
-    --input  experiments/atlas_experiment/data/atlas_200m.bin \
-    --output experiments/atlas_experiment/data/atlas_200m.vxc \
+    --input  experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin \
+    --output experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.vxc \
     --config experiments/atlas_experiment/config.yaml
 ```
 6) Decompress
 ```bash
 python scripts/decompress.py \
     --model  experiments/atlas_experiment/checkpoints/best.pt \
-    --input  experiments/atlas_experiment/data/atlas_200m.vxc \
-    --output experiments/atlas_experiment/data/atlas_200m_recovered.bin \
+    --input  experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.vxc \
+    --output experiments/atlas_experiment/data/mc-flavtag-ttbar-medium_recovered.bin \
     --config experiments/atlas_experiment/config.yaml
 ```

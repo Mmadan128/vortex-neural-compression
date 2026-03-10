@@ -31,7 +31,8 @@ from vortex.utils.training import load_checkpoint, get_amp_dtype
 
 
 
-SAMPLE_MB = 50
+SAMPLE_MB  = 1024  # default MB for both baselines and Vortex (1 GB)
+DEFAULT_DATA = "experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin"
 
 def _read_sample(path: str, max_mb: float = SAMPLE_MB) -> bytes:
     max_bytes = int(max_mb * 1024 * 1024)
@@ -57,6 +58,7 @@ def _stats(original: bytes, compressed: bytes, elapsed: float) -> dict:
         "bpd":       c * 8 / n,
         "ratio_x":   n / c,
         "size_mb":   c / 1024 / 1024,
+        "elapsed_s": elapsed,
         "speed_mbs": n / 1e6 / elapsed if elapsed > 0 else 0.0,
     }
 
@@ -115,9 +117,10 @@ def all_baselines(data: bytes) -> list:
 def print_table(rows: list, vortex: dict = None):
     gzip6_bpd = next((r["bpd"] for r in rows if "Gzip" in r["name"] and "L6" in r["name"]), None)
 
-    W = [18, 8, 8, 9, 11, 10]
+    #                  Codec   BPD   Ratio  Size MB  Time(s)  Speed MB/s  vs Gzip-6
+    W = [18, 8, 8, 9, 9, 11, 10]
     sep  = "+" + "+".join("-" * (w + 2) for w in W) + "+"
-    head = ["Codec", "BPD", "Ratio", "Size MB", "Speed MB/s", "vs Gzip-6"]
+    head = ["Codec", "BPD", "Ratio", "Size MB", "Time (s)", "Speed MB/s", "vs Gzip-6"]
 
     def fmt_row(vals):
         return "| " + " | ".join(str(v).ljust(w) for v, w in zip(vals, W)) + " |"
@@ -127,15 +130,13 @@ def print_table(rows: list, vortex: dict = None):
     print(sep)
 
     for r in rows:
-        if gzip6_bpd:
-            delta = f"{(gzip6_bpd - r['bpd']) / gzip6_bpd * 100:+.1f}%"
-        else:
-            delta = "n/a"
+        delta = f"{(gzip6_bpd - r['bpd']) / gzip6_bpd * 100:+.1f}%" if gzip6_bpd else "n/a"
         print(fmt_row([
             r["name"],
             f"{r['bpd']:.4f}",
             f"{r['ratio_x']:.2f}x",
             f"{r['size_mb']:.2f}",
+            f"{r['elapsed_s']:.2f}s",
             f"{r['speed_mbs']:.1f}",
             delta,
         ]))
@@ -143,12 +144,14 @@ def print_table(rows: list, vortex: dict = None):
     if vortex is not None and vortex["bpd"] != float("inf"):
         print(sep)
         v_delta = f"{(gzip6_bpd - vortex['bpd']) / gzip6_bpd * 100:+.1f}%" if gzip6_bpd else "n/a"
+        v_time  = f"{vortex['elapsed_s']:.2f}s" if vortex.get('elapsed_s') is not None else "—"
         print(fmt_row([
             "* Vortex-Codec",
             f"{vortex['bpd']:.4f}",
             f"{vortex['ratio_x']:.2f}x",
             "(theoretical)",
-            "—",
+            v_time,
+            f"{vortex.get('speed_mbs', 0):.1f}" if vortex.get('speed_mbs') else "—",
             v_delta,
         ]))
     print(sep)
@@ -158,13 +161,28 @@ def print_table(rows: list, vortex: dict = None):
 def eval_vortex(model, dl, vocab_size, device, amp_dtype, max_tokens=None) -> dict:
     criterion = nn.CrossEntropyLoss()
     total_nats, total_tokens = 0.0, 0
-    fp16 = device == "cuda"
+    fp16     = device == "cuda"
     dev_type = device.split(":")[0]  # "cuda:0" -> "cuda"
 
+    # Accurate tqdm total: only count the batches we'll actually process
+    if max_tokens is not None:
+        try:
+            bs = dl.batch_size
+            w  = dl.dataset.window
+            max_batches = math.ceil(max_tokens / (bs * (w - 1)))
+        except Exception:
+            max_batches = None
+    else:
+        max_batches = len(dl)
+
+    # Warmup: one dummy batch so torch.compile JIT doesn't skew timing
+    if device == "cuda":
+        torch.cuda.synchronize()
+    t0 = time.time()
+
     with torch.no_grad():
-        for batch in tqdm(dl, desc="  Vortex"):
+        for batch in tqdm(dl, desc="  Vortex", total=max_batches):
             batch = batch.to(device)
-            # Each window is independent — no meaningful past context across batches.
             with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                 logits, _, _ = model(batch, None)
                 loss = criterion(
@@ -177,26 +195,40 @@ def eval_vortex(model, dl, vocab_size, device, amp_dtype, max_tokens=None) -> di
             if max_tokens and total_tokens >= max_tokens:
                 break
 
-    bpd = total_nats / total_tokens / math.log(2)
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elapsed = time.time() - t0
+
+    data_mb  = total_tokens / 1e6
+    bpd      = total_nats / total_tokens / math.log(2)
     return {
-        "bpd":     bpd,
-        "ratio_x": 8 / bpd,
+        "bpd":       bpd,
+        "ratio_x":   8 / bpd,
+        "elapsed_s": elapsed,
+        "speed_mbs": data_mb / elapsed if elapsed > 0 else 0.0,
+        "data_mb":   data_mb,
     }
 
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model",         required=False, default=None)
-    p.add_argument("--data",          required=True)
-    p.add_argument("--config",       default="experiments/atlas_experiment/config.yaml")
-    p.add_argument("--device",       default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--model",    required=False, default=None)
+    p.add_argument("--data",     default=DEFAULT_DATA,
+                   help=f"Binary test file (default: {DEFAULT_DATA})")
+    p.add_argument("--config",   default="experiments/atlas_experiment/config.yaml")
+    p.add_argument("--device",   default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-baselines", action="store_true", help="Skip baseline codecs")
-    p.add_argument("--sample-mb",    type=float, default=SAMPLE_MB,
-                   help=f"MB of data to use for baselines (default: {SAMPLE_MB})")
-    p.add_argument("--batch-size",    type=int, default=32)
-    p.add_argument("--full-vortex",   action="store_true",
-                   help="Evaluate Vortex on full file; baselines still use --sample-mb")
+    p.add_argument("--sample-mb",   type=float, default=SAMPLE_MB,
+                   help=f"MB of data sample for baselines (default: {SAMPLE_MB})")
+    p.add_argument("--vortex-mb",   type=float, default=None,
+                   help="MB of data for Vortex eval (default: same as --sample-mb).\n"
+                        "Pass a larger value to get a more representative BPD.")
+    p.add_argument("--no-compile",  action="store_true",
+                   help="Disable torch.compile (use if compile causes issues)")
+    p.add_argument("--batch-size",  type=int, default=64)
+    p.add_argument("--full-vortex", action="store_true",
+                   help="Evaluate Vortex on the full file; baselines still use --sample-mb")
     p.add_argument("--baselines-only", action="store_true",
                    help="Run baseline codecs only, skip Vortex model")
     p.add_argument("--out-json", default=None, metavar="PATH",
@@ -224,8 +256,7 @@ def main():
 
     baseline_results = []
     if not args.no_baselines:
-        print(f"  Running baselines on {args.sample_mb:.0f} MB sample "
-              f"(not full {data_size_gb:.1f} GB — use --sample-mb to adjust)...")
+        print(f"  Running baselines on {args.sample_mb:.0f} MB sample ...")
         sample = _read_sample(args.data, args.sample_mb)
         baseline_results = all_baselines(sample)
         del sample
@@ -271,11 +302,24 @@ def main():
     model.eval()
 
     params = sum(p.numel() for p in model.parameters()) / 1e6
-    print(f"  Model : {params:.1f}M parameters\n")
+    print(f"  Model : {params:.1f}M parameters")
+
+    if not getattr(args, 'no_compile', False) and hasattr(torch, 'compile'):
+        print("  Compiling model (torch.compile reduce-overhead) ...")
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print("  Compile OK\n")
+        except Exception as e:
+            print(f"  Compile skipped ({e})\n")
+    else:
+        print()
 
     dl = _make_eval_loader(args.data, c["window_size"], args.batch_size)
 
-    max_tok = None if args.full_vortex else int(args.sample_mb * 1024 * 1024)
+    vortex_mb = args.vortex_mb if args.vortex_mb else args.sample_mb
+    max_tok   = None if args.full_vortex else int(vortex_mb * 1024 * 1024)
+    print(f"  Evaluating Vortex on {'full file' if args.full_vortex else f'{vortex_mb:.0f} MB'} ..."
+          f"  (--vortex-mb to change, --full-vortex for entire file)")
     vortex = eval_vortex(model, dl, m["vocab_size"], args.device, amp_dtype, max_tok)
 
     print()
@@ -287,9 +331,11 @@ def main():
     print(f"\n{'='*62}")
     print(f"  Summary")
     print(f"{'='*62}")
-    print(f"  Vortex BPD : {vortex['bpd']:.4f}  ({vortex['ratio_x']:.2f}x)")
-    print(f"  Evaluated on full test set ({data_size_gb:.2f} GB)")
-    print(f"  Baselines on {args.sample_mb:.0f} MB sample")
+    vortex_mb_used = args.sample_mb if not args.full_vortex and not args.vortex_mb else (args.vortex_mb or data_size_gb*1024)
+    print(f"  Vortex BPD   : {vortex['bpd']:.4f}  ({vortex['ratio_x']:.2f}x)")
+    print(f"  Vortex speed : {vortex.get('speed_mbs', 0):.1f} MB/s  ({vortex['elapsed_s']:.1f}s on {vortex['data_mb']:.0f} MB)")
+    print(f"  Baselines on : {args.sample_mb:.0f} MB sample  |  Vortex on: {vortex['data_mb']:.0f} MB")
+    print(f"  Data file    : {args.data}  ({data_size_gb:.2f} GB total)")
     if baseline_results:
         for tag, key in [("Gzip-6",  "Gzip  (L6)"),
                          ("Zlib-9",  "Zlib  (L9)"),
@@ -318,15 +364,19 @@ def main():
             "model": args.model,
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
             "vortex": {
-                "bpd":     round(vortex["bpd"], 6),
-                "ratio_x": round(vortex["ratio_x"], 4),
+                "bpd":       round(vortex["bpd"], 6),
+                "ratio_x":   round(vortex["ratio_x"], 4),
+                "elapsed_s": round(vortex.get("elapsed_s", 0), 2),
+                "speed_mbs": round(vortex.get("speed_mbs", 0), 2),
+                "data_mb":   round(vortex.get("data_mb", 0), 1),
             },
             "baselines": [
                 {
-                    "name":      r["name"].strip(),
-                    "bpd":       round(r["bpd"], 6),
-                    "ratio_x":   round(r["ratio_x"], 4),
-                    "speed_mbs": round(r["speed_mbs"], 2),
+                    "name":          r["name"].strip(),
+                    "bpd":           round(r["bpd"], 6),
+                    "ratio_x":       round(r["ratio_x"], 4),
+                    "elapsed_s":     round(r.get("elapsed_s", 0), 3),
+                    "speed_mbs":     round(r["speed_mbs"], 2),
                     "vs_vortex_pct": round(
                         (r["bpd"] - vortex["bpd"]) / r["bpd"] * 100, 2
                     ),

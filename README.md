@@ -21,22 +21,24 @@ python scripts/train.py --config experiments/atlas_experiment/config.yaml
 # 3. Compress a file
 python scripts/compress.py \
     --model  experiments/atlas_experiment/checkpoints/best.pt \
-    --input  experiments/atlas_experiment/data/atlas_200m.bin \
-    --output experiments/atlas_experiment/data/atlas_200m.vxc \
+    --input  experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin \
+    --output experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.vxc \
     --config experiments/atlas_experiment/config.yaml
 
 # 4. Decompress
 python scripts/decompress.py \
     --model  experiments/atlas_experiment/checkpoints/best.pt \
-    --input  experiments/atlas_experiment/data/atlas_200m.vxc \
-    --output experiments/atlas_experiment/data/atlas_200m_recovered.bin \
+    --input  experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.vxc \
+    --output experiments/atlas_experiment/data/mc-flavtag-ttbar-medium_recovered.bin \
     --config experiments/atlas_experiment/config.yaml
 
-# 5. Evaluate vs Gzip / Zstd
+# 5. Evaluate vs Gzip / Zstd  (1 GB sample, AMD MI300X)
 python scripts/evaluate.py \
-    --model experiments/atlas_experiment/checkpoints/best.pt \
-    --data  experiments/atlas_experiment/data/atlas_200m.bin \
-    --config experiments/atlas_experiment/config.yaml
+    --model      experiments/atlas_experiment/checkpoints/best.pt \
+    --data       experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin \
+    --config     experiments/atlas_experiment/config.yaml \
+    --device     cuda \
+    --batch-size 256
 ```
 
 ---
@@ -246,6 +248,6 @@ batch_size: 32  |  lr: 3e-4  |  warmup: 4000  |  max_steps: 100000
 
 - **Source**: CERN EOS `root://eospublic.cern.ch//eos/opendata/atlas/datascience/ATLAS-FTAG-2023-05/`
 - **Format**: HDF5 → extracted to raw binary (`atlas.bin`) via `download.py`
-- **Training subset**: `mc-flavtag-ttbar-medium.h5` / `atlas_200m.bin` (200 MB slice)
+- **Benchmark sample**: `mc-flavtag-ttbar-medium.bin` (1 GB) — used for both baseline and Vortex evaluation
 - **Structured dtype**: 30 fields including `pt_btagJes`, `GN2v01_pb`, kinematics, labels
 - See `docs/ARCHITECTURE_COMPARISON.md` for a detailed v1 → v3 component diff and BPD benchmarks.

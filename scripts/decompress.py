@@ -7,10 +7,12 @@ import torch, numpy as np
 from tqdm import tqdm
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
-from vortex.compression.arithmetic_coding import decode, TORCHAC_AVAILABLE
+from vortex.compression.range_coder_gpu import (
+    StreamDecoder, make_gpu_cdf, RANGE_CODER_AVAILABLE,
+)
 from vortex.utils.training import load_checkpoint
 
-MAGIC = b"VXC1"
+MAGIC = b"VXC2"   # must match compressor
 
 
 def parse_args():
@@ -25,8 +27,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if not TORCHAC_AVAILABLE:
-        sys.exit("pip install torchac  (required for arithmetic coding)")
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     m, c = cfg["model"], cfg["compressive_memory"]
@@ -41,7 +41,11 @@ def main():
     model.eval()
 
     with open(args.input, "rb") as f:
-        assert f.read(4) == MAGIC, f"{args.input} is not a valid .vxc file"
+        magic = f.read(4)
+        assert magic == MAGIC, (
+            f"{args.input}: expected magic {MAGIC} (VXC2 lossless format), "
+            f"got {magic}. Re-compress with the updated compress.py."
+        )
         original_size = struct.unpack(">Q", f.read(8))[0]
         n_chunks      = struct.unpack(">I", f.read(4))[0]
         blobs         = [f.read(struct.unpack(">I", f.read(4))[0]) for _ in range(n_chunks)]
@@ -49,41 +53,51 @@ def main():
     chunk_size = c["window_size"]
     print(f"Decompressing {n_chunks} chunks -> {original_size/1024/1024:.2f} MB")
 
-    fp16     = args.device == "cuda"
+    amp_device = "cuda" if args.device == "cuda" else "cpu"
+    use_amp    = (args.device == "cuda")
+
     output   = []
-    memories = None
+    memories = None          # cross-chunk infini-attention state
+    SOS      = torch.zeros(1, 1, dtype=torch.long, device=args.device)  # start-of-sequence
     t0       = time.time()
 
     with torch.no_grad():
         for blob in tqdm(blobs, desc="Decompressing"):
-
-
-            all_probs = []
-            x         = torch.zeros(1, 1, dtype=torch.long, device=args.device)
+            # ── Autoregressive decode ──────────────────────────────────────
+            # Mirror of compress.py's shifted-input logic:
+            #   encode used probs from model([SOS, x_0, …, x_{T-2}], memories)
+            #   so decode must reconstruct exactly those probs, token by token.
+            #
+            # With KV cache: each step is a single-token forward pass O(1)
+            # attention instead of O(t) re-processing from scratch.
+            dec       = StreamDecoder(blob)   # stateful range-coder reader
             kv_caches = None
-            mem_snapshot = memories
+            x_in      = SOS                   # first input is SOS (= 0)
+            decoded   = []
 
-            with torch.amp.autocast("cuda", enabled=fp16):
-                for pos in range(chunk_size):
-                    probs_step, _, kv_caches = model.get_probs(x, mem_snapshot, kv_caches)
-                    step_p = probs_step[:, -1:, :].float()
-                    all_probs.append(step_p)
+            with torch.amp.autocast(amp_device, enabled=use_amp):
+                for _ in range(chunk_size):
+                    # Single-token forward — uses memories as infini-attention
+                    # context (fixed for whole chunk) and grows kv_caches.
+                    probs_step, _, kv_caches = model.get_probs(
+                        x_in, memories, kv_caches
+                    )
 
-                    x = torch.zeros(1, 1, dtype=torch.long, device=args.device)
+                # probs_step[:, -1, :] = P(next_token | all seen so far, memories)
+                    cdf_row = make_gpu_cdf(probs_step[:, -1:, :].float())[0]  # (257,)
+                    sym     = dec.decode_symbol(cdf_row)   # recovers x[t] exactly
+                    decoded.append(sym)
 
+                    # Feed decoded symbol back as next input
+                    x_in = torch.tensor([[sym]], dtype=torch.long, device=args.device)
 
-            dummy = torch.zeros(1, chunk_size, dtype=torch.long, device=args.device)
-            with torch.amp.autocast("cuda", enabled=fp16):
-                probs, _, _ = model.get_probs(dummy, mem_snapshot)
-            probs = probs.float()
-
-            decoded_tensor = decode(blob, probs)
-            decoded = decoded_tensor[0].tolist()
-
-            recovered = torch.tensor(decoded, dtype=torch.long,
-                                     device=args.device).unsqueeze(0)
-            with torch.amp.autocast("cuda", enabled=fp16):
-                _, memories, _ = model(recovered, memories)
+            # ── Memory update (mirrors compress.py exactly) ───────────────
+            # Run the full recovered chunk through the model to produce the
+            # same cross-chunk memory state that compress.py computed.
+            x_full = torch.tensor(decoded, dtype=torch.long,
+                                  device=args.device).unsqueeze(0)  # (1, T)
+            with torch.amp.autocast(amp_device, enabled=use_amp):
+                _, memories, _ = model(x_full, memories)
             memories = [mm.detach() if mm is not None else None for mm in memories]
 
             output.extend(decoded)
@@ -97,8 +111,8 @@ def main():
 
     orig_bin = args.input.replace(".vxc", ".bin")
     print(f"\nVerify:")
-    print(f"  python -c \"import hashlib; h=lambda f:hashlib.md5(open(f,'rb').read()).hexdigest(); print('OK' if h('{orig_bin}')==h('{args.output}') else 'MISMATCH')\"")
-
+    print(f"  python -c \"import hashlib; h=lambda f:hashlib.md5(open(f,'rb').read()).hexdigest(); "
+          f"print('OK' if h('{orig_bin}')==h('{args.output}') else 'MISMATCH')\"")
 
 
 if __name__ == "__main__":

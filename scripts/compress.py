@@ -7,10 +7,12 @@ import torch, numpy as np
 from tqdm import tqdm
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
-from vortex.compression.arithmetic_coding import encode, theoretical_bpd, TORCHAC_AVAILABLE
+from vortex.compression.range_coder_gpu import (
+    gpu_encode, theoretical_bpd, RANGE_CODER_AVAILABLE,
+)
 from vortex.utils.training import load_checkpoint
 
-MAGIC = b"VXC1"
+MAGIC = b"VXC2"   # bumped version: shifted-input lossless format
 
 
 def parse_args():
@@ -25,8 +27,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if not TORCHAC_AVAILABLE:
-        sys.exit("pip install torchac  (required for arithmetic coding)")
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
     m, c = cfg["model"], cfg["compressive_memory"]
@@ -49,19 +49,38 @@ def main():
     chunks = data.reshape(-1, chunk_size)
     print(f"Input : {args.input}  ({original_size/1024/1024:.2f} MB,  {len(chunks)} chunks)")
 
-    fp16 = args.device == "cuda"
-    t0   = time.time()
-    compressed_chunks, total_bpd, memories = [], 0.0, None
+    # Mixed-precision dtype (fp16 on CUDA, bf16 on CPU if available)
+    amp_device = "cuda" if args.device == "cuda" else "cpu"
+    use_amp    = (args.device == "cuda")
+
+    t0                    = time.time()
+    compressed_chunks     = []
+    total_bpd             = 0.0
+    memories              = None          # cross-chunk infini-attention state
+    SOS                   = torch.zeros(1, 1, dtype=torch.long, device=args.device)
 
     with torch.no_grad():
         for chunk in tqdm(chunks, desc="Compressing"):
             x = torch.from_numpy(chunk.astype(np.int64)).unsqueeze(0).to(args.device)
-            with torch.amp.autocast("cuda", enabled=fp16):
-                probs, memories, _ = model.get_probs(x, memories)
-            memories = [mm.detach() if mm is not None else None for mm in memories]
-            probs_f32 = probs.float()
-            compressed_chunks.append(encode(probs_f32, x.short()))
+            # (1, T) — values in [0, 255]
+
+            # ── Shifted input: [SOS, x_0, …, x_{T-2}] ───────────────────
+            # This ensures  probs[t] = P(x[t] | x[0..t-1], memories)
+            # so the encoder CDF at position t does NOT see x[t] itself,
+            # meaning the decoder can reproduce it autoregressively.
+            x_shifted = torch.cat([SOS, x[:, :-1]], dim=1)  # (1, T)
+
+            with torch.amp.autocast(amp_device, enabled=use_amp):
+                probs, _, _ = model.get_probs(x_shifted, memories)
+
+            probs_f32 = probs.float()                    # (1, T, 256)
+            compressed_chunks.append(gpu_encode(probs_f32, x))
             total_bpd += theoretical_bpd(probs_f32, x)
+
+            # ── Memory update: run full x so decompress can mirror exactly ─
+            with torch.amp.autocast(amp_device, enabled=use_amp):
+                _, memories, _ = model(x, memories)
+            memories = [mm.detach() if mm is not None else None for mm in memories]
 
     mean_bpd = total_bpd / len(chunks)
     with open(args.output, "wb") as f:
@@ -72,9 +91,9 @@ def main():
             f.write(struct.pack(">I", len(cb)))
             f.write(cb)
 
-    elapsed  = time.time() - t0
-    csize    = os.path.getsize(args.output)
-    ratio    = csize / original_size
+    elapsed = time.time() - t0
+    csize   = os.path.getsize(args.output)
+    ratio   = csize / original_size
     print(f"\nOutput : {args.output}  ({csize/1024/1024:.2f} MB)")
     print(f"BPD    : {mean_bpd:.4f}")
     print(f"Ratio  : {ratio:.3f}  ({1/ratio:.2f}x compression)")

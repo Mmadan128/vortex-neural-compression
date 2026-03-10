@@ -1,0 +1,76 @@
+# ============================================================
+# HEPMC Neural Compression — AMD Instinct MI300X
+# ------------------------------------------------------------
+# Hardware  : 1x MI300X  |  192 GB HBM3  |  20 vCPU  |  240 GB RAM
+#             Boot: 720 GB NVMe  |  Scratch: 5 TB NVMe
+#
+# Dataset   : ATLAS Open Data HEPMC Monte Carlo events
+#             root://eospublic.cern.ch//eos/opendata/atlas/rucio/
+#               mc16_13TeV/HEPMC.43646133._000001.tar.gz.1
+#             Full byte stream split 80/10/10 train/val/test
+#             Download: python experiments/hepmc_experiment/download.py
+#
+# Model     : 25 M params  (d=512, L=8, H=8, ff=2048)
+# VRAM      : ~5 GB — trivial at batch=256 on 192 GB HBM
+# Training  : ~300k steps, bf16, ~5-6 h on MI300X
+# ============================================================
+
+experiment:
+  name: hepmc_mi300x
+  description: >
+    Byte-level neural compression on ATLAS HEPMC Monte Carlo event
+    byte stream. Full file with 80/10/10 train/val/test byte splits.
+
+model:
+  d_model:    512
+  n_layers:   8
+  n_heads:    8
+  d_ff:       2048
+  dropout:    0.1
+  vocab_size: 256
+  use_tdt:    false   # HEPMC is ASCII text — no per-type float32 embedding needed
+
+compressive_memory:
+  window_size:      512
+  compression_rate: 4
+
+cat:
+  enabled:     true
+  chunk_sizes: [128, 256, 512]
+
+training:
+  batch_size:               256
+  grad_accumulation_steps:  1
+  learning_rate:            3e-4
+  max_steps:                300000
+  warmup_steps:             6000
+  grad_clip:                1.0
+  weight_decay:             0.01
+  mixed_precision:          true     # bfloat16 on ROCm / MI300X
+  gradient_checkpointing:   false    # 192 GB HBM — no need to trade VRAM for recompute
+  compile_model:            false
+  seed:                     42
+
+data:
+  window_size: 512
+  stride:      512        # non-overlapping windows — maximum data diversity
+  num_workers: 16         # 20 vCPUs available; 16 workers saturate GPU pipeline
+  streaming:   false
+  preload:     true       # load train + val into 240 GB RAM at startup (~seconds)
+
+# Update paths if storing data on the 5 TB scratch disk, e.g.:
+#   train_data: /mnt/scratch/hepmc/hepmc_full_train.hepmc
+paths:
+  train_data:     experiments/hepmc_experiment/data/hepmc_full_train.hepmc
+  val_data:       experiments/hepmc_experiment/data/hepmc_full_val.hepmc
+  checkpoint_dir: experiments/hepmc_experiment/checkpoints/
+  log_dir:        experiments/hepmc_experiment/runs/
+
+evaluation:
+  test_data:     experiments/hepmc_experiment/data/hepmc_full_test.hepmc
+  eval_interval: 1000
+  eval_batches:  50
+
+logging:
+  log_interval:  100
+  save_interval: 10000

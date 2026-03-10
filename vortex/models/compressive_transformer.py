@@ -36,21 +36,27 @@ class TDTEmbedding(nn.Module):
         self.type_scale = nn.Parameter(torch.ones(4))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x : (B, T) -> (B, T, d_model)"""
+        """x : (B, T) -> (B, T, d_model)
+
+        Vectorized single-lookup: eliminates the 4×(bool-mask + scatter) graph
+        breaks so torch.compile can capture the whole model as one CUDA graph.
+
+        Each embedding table i is placed at rows [i*256 … (i+1)*256) of a
+        combined [4*256, d_model] weight matrix built by torch.cat — the
+        individual nn.Embedding parameters are untouched, so checkpoint keys
+        stay identical.  No data is duplicated at init; the cat happens once
+        per forward (fused by the compiler into a no-copy view on most paths).
+        """
         B, T = x.shape
-        pos_in_float = torch.arange(T, device=x.device) % 4
-
-        all_embeds = torch.stack([e(x) for e in self.embeds], dim=0)  # (4,B,T,D)
-        all_embeds = all_embeds.permute(1, 2, 0, 3)                   # (B, T, 4, D)
-
-        idx = (pos_in_float
-               .view(1, T, 1, 1)
-               .expand(B, T, 1, self.d_model))
-        selected = all_embeds.gather(2, idx).squeeze(2)  # (B, T, D)
-
-        scale     = torch.softmax(self.type_scale, dim=0)
-        scale_map = scale[pos_in_float]
-        return selected * scale_map.view(1, T, 1)
+        pos_type  = torch.arange(T, device=x.device) % 4            # [T]
+        # Combined lookup: row = byte_value + table_index * 256
+        combined  = torch.cat([emb.weight for emb in self.embeds], dim=0)  # [1024, D]
+        x_shifted = x + pos_type.unsqueeze(0).mul(256)               # [B, T]
+        out       = F.embedding(x_shifted, combined)                  # [B, T, D]
+        # Per-position scale gate (static shape → compile-friendly)
+        scale     = torch.softmax(self.type_scale, dim=0)             # [4]
+        out       = out * scale[pos_type].view(1, T, 1)               # [B, T, D]
+        return out
 
 
 class LearnableTokenEviction(nn.Module):
