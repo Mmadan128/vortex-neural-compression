@@ -211,7 +211,7 @@ def main():
     scaler    = torch.amp.GradScaler(dev_type, enabled=(fp16 and amp_dtype == torch.float16))
     stopper   = EarlyStopping(patience=8)
     writer    = SummaryWriter(p_cfg["log_dir"])
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(reduction="sum")
 
     step, best_bpd = 0, float("inf")
 
@@ -313,7 +313,9 @@ def main():
 
             if step > 0 and step % eval_interval == 0 and val_dl:
                 model.eval()
-                val_nats, val_tokens, val_mems = 0.0, 0, None
+                val_nats   = torch.zeros(1, device=device)
+                val_tokens = 0
+                val_mems   = None
                 eval_batches = cfg.get("evaluation", {}).get("eval_batches", 50)
                 with torch.no_grad():
                     for _eval_i, vbatch in enumerate(val_dl):
@@ -327,11 +329,13 @@ def main():
                                 vbatch[:, 1:].reshape(-1),
                             )
                         n_tok = vbatch.size(0) * (vbatch.size(1) - 1)
-                        val_nats   += vloss.item() * n_tok
+                        val_nats   += vloss.detach()   # stays on GPU
                         val_tokens += n_tok
                         val_mems = [mm.detach() if mm is not None else None
                                     for mm in val_mems]
-                val_bpd = val_nats / val_tokens / math.log(2)
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                val_bpd = val_nats.item() / val_tokens / math.log(2)
                 writer.add_scalar("val/bpd", val_bpd, step)
 
                 elapsed_h = (time.time() - t0) / 3600
@@ -373,7 +377,9 @@ def main():
 
         if val_dl and step % eval_interval != 0:
             model.eval()
-            val_nats, val_tokens, val_mems = 0.0, 0, None
+            val_nats   = torch.zeros(1, device=device)
+            val_tokens = 0
+            val_mems   = None
             with torch.no_grad():
                 for vbatch in val_dl:
                     vbatch = vbatch.to(device)
@@ -384,11 +390,13 @@ def main():
                             vbatch[:, 1:].reshape(-1),
                         )
                     n_tok = vbatch.size(0) * (vbatch.size(1) - 1)
-                    val_nats   += vloss.item() * n_tok
+                    val_nats   += vloss.detach()
                     val_tokens += n_tok
                     val_mems = [mm.detach() if mm is not None else None
                                 for mm in val_mems]
-            val_bpd = val_nats / val_tokens / math.log(2)
+            if device == "cuda":
+                torch.cuda.synchronize()
+            val_bpd = val_nats.item() / val_tokens / math.log(2)
             writer.add_scalar("val/bpd", val_bpd, step)
 
             elapsed_h = (time.time() - t0) / 3600
