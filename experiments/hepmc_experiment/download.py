@@ -59,6 +59,10 @@ def root_to_https(root_url: str) -> str:
 	return "https://eospublic.cern.ch" + path
 
 
+def has_aria2c() -> bool:
+	return shutil.which("aria2c") is not None
+
+
 def has_xrdcp() -> bool:
 	try:
 		subprocess.run(["xrdcp", "--version"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -68,7 +72,7 @@ def has_xrdcp() -> bool:
 
 
 def download_file(url: str, dest: Path, force: bool = False) -> Path:
-	"""Download a file from HTTPS or via xrdcp fallback into dest path.
+	"""Download a file using aria2c (preferred), xrdcp, or HTTPS fallback.
 
 	Returns the path to the downloaded file.
 	"""
@@ -78,43 +82,53 @@ def download_file(url: str, dest: Path, force: bool = False) -> Path:
 		return dest
 
 	https_url = root_to_https(url)
-	print(f"Downloading from: {https_url}")
 
+	# 1. aria2c — 16 parallel connections, fastest option
+	if has_aria2c():
+		print(f"[download] aria2c -> {dest}")
+		try:
+			subprocess.check_call([
+				"aria2c",
+				"-x16", "-s16", "-j16", "-k1M",
+				"--check-certificate=false",
+				"--summary-interval=10",
+				"--allow-overwrite=true",
+				"-o", dest.name,
+				"-d", str(dest.parent),
+				https_url,
+			])
+			return dest
+		except subprocess.CalledProcessError as e:
+			print(f"[download] aria2c failed ({e}), trying next method...")
+
+	# 2. xrdcp fallback for root:// URLs
+	if url.startswith("root://") and has_xrdcp():
+		print(f"[download] xrdcp -> {dest}")
+		try:
+			subprocess.check_call(["xrdcp", "-f", "--insecure", url, str(dest)])
+			return dest
+		except subprocess.CalledProcessError as e:
+			print(f"[download] xrdcp failed ({e}), trying HTTPS...")
+
+	# 3. Plain HTTPS fallback
+	print(f"[download] HTTPS -> {dest}")
 	try:
 		with requests.get(https_url, stream=True, timeout=60) as r:
 			r.raise_for_status()
 			total = int(r.headers.get("Content-Length", 0))
 			with open(dest, "wb") as f, tqdm(
 				total=total if total > 0 else None,
-				unit="B",
-				unit_scale=True,
+				unit="B", unit_scale=True,
 				desc=f"Downloading {dest.name}",
 			) as pbar:
-				for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1 MiB chunks
+				for chunk in r.iter_content(chunk_size=1024 * 1024):
 					if chunk:
 						f.write(chunk)
 						if total > 0:
 							pbar.update(len(chunk))
 		return dest
-	except Exception as https_err:
-		print(f"HTTPS download failed: {https_err}")
-
-	# Fallback to xrdcp if available
-	if has_xrdcp():
-		print("Falling back to xrdcp…")
-		cmd = [
-			"xrdcp",
-			"-f",
-			url,
-			str(dest),
-		]
-		try:
-			subprocess.run(cmd, check=True)
-			return dest
-		except subprocess.CalledProcessError as e:
-			raise RuntimeError(f"xrdcp failed with exit code {e.returncode}") from e
-	else:
-		raise RuntimeError("Both HTTPS and xrdcp download attempts failed.")
+	except Exception as e:
+		raise RuntimeError(f"All download methods failed: {e}") from e
 
 
 def safe_extract_tar(tar_path: Path, extract_dir: Path) -> None:
