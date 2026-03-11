@@ -91,15 +91,36 @@ def ensure_dir(path: str) -> None:
 
 
 def download_file(url: str, dest_path: str, chunk_size: int = 1 << 20, timeout: float = 60.0) -> None:
-	"""Download a file over HTTP(S) to dest_path with a simple chunked reader."""
-	import urllib.request
-	request = urllib.request.Request(url, headers={"User-Agent": "boa-constrictor/cms-lg"})
-	with urllib.request.urlopen(request, timeout=timeout) as resp, open(dest_path, "wb") as out:
-		while True:
-			chunk = resp.read(chunk_size)
-			if not chunk:
-				break
-			out.write(chunk)
+	"""Download a file over HTTP(S) to dest_path.
+
+	Uses aria2c (16 parallel connections) when available for ~10x speed-up
+	vs single-threaded urllib on CERN OpenData servers.
+	Falls back to urllib if aria2c is not installed.
+	"""
+	import shutil, subprocess
+	if shutil.which("aria2c"):
+		print(f"        [aria2c] 16 connections → {dest_path}")
+		cmd = [
+			"aria2c",
+			"--split=16",
+			"--max-connection-per-server=16",
+			"--min-split-size=10M",
+			"--file-allocation=none",
+			"--out", os.path.basename(dest_path),
+			"--dir", os.path.dirname(os.path.abspath(dest_path)) or ".",
+			url,
+		]
+		subprocess.run(cmd, check=True)
+	else:
+		print(f"        [urllib] aria2c not found, using single-threaded download")
+		import urllib.request
+		request = urllib.request.Request(url, headers={"User-Agent": "boa-constrictor/cms-lg"})
+		with urllib.request.urlopen(request, timeout=timeout) as resp, open(dest_path, "wb") as out:
+			while True:
+				chunk = resp.read(chunk_size)
+				if not chunk:
+					break
+				out.write(chunk)
 
 
 def open_tree(file_url_or_path: str) -> Tuple[uproot.reading.ReadOnlyDirectory, str, uproot.behaviors.TBranch.TTree]:
