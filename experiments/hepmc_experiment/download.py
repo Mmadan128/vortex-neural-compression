@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-Download a HEPMC tarball from CERN EOS, extract it, and materialize:
-  - data/hepmc_full.hepmc        : full binary byte stream of the extracted HEPMC file
-  - data/hepmc_full_train.hepmc  : 80 % train split
-  - data/hepmc_full_val.hepmc    : 10 % validation split
-  - data/hepmc_full_test.hepmc   : 10 % test split
+Download multiple HEPMC tarballs from CERN EOS, extract and concatenate them,
+then split into train / val / test:
 
-Source:
-  root://eospublic.cern.ch//eos/opendata/atlas/rucio/mc16_13TeV/HEPMC.43646133._000001.tar.gz.1
+  data/hepmc_full.hepmc        : concatenated byte stream of all downloaded files
+  data/hepmc_full_train.hepmc  : 80% train split
+  data/hepmc_full_val.hepmc    : 10% validation split
+  data/hepmc_full_test.hepmc   : 10% test split
 
-This script streams the download over HTTPS (with xrdcp fallback if available),
-extracts the tar.gz safely, locates the contained HEPMC file, and writes the outputs
-to experiments/hepmc_experiment/data/.
+Source pattern:
+  root://eospublic.cern.ch//eos/opendata/atlas/rucio/mc16_13TeV/
+    HEPMC.43646133._000001.tar.gz.1  (and _000002, _000003, ...)
 
 Usage:
+  # Download 10 files (default) — gives ~5-10 GB, test split ~500MB-1GB
   python download.py
 
+  # Download a specific number of files
+  python download.py --num-files 5
+
+  # Use a custom base URL (files numbered _000001 through _000NNN)
+  python download.py --num-files 10 --base-url root://eospublic.cern.ch//eos/...
+
 Notes:
-  - Splits are 80/10/10 by raw byte offsets (suitable for byte-level models).
-  - If the outputs already exist they won't be overwritten unless --force is used.
+  - Splits are 80/10/10 by raw byte offsets.
+  - Files that fail to download are skipped (warning printed); pipeline continues
+    as long as at least one file succeeds.
+  - Re-run with --force to overwrite existing outputs.
 """
 
 from __future__ import annotations
@@ -38,9 +46,16 @@ import requests
 from tqdm import tqdm
 
 
-ROOT_URL = (
-	"root://eospublic.cern.ch//eos/opendata/atlas/rucio/mc16_13TeV/HEPMC.43646133._000001.tar.gz.1"
+# Base URL pattern — _NNNNNN suffix is appended per file number
+BASE_URL = (
+	"root://eospublic.cern.ch//eos/opendata/atlas/rucio/mc16_13TeV/HEPMC.43646133"
 )
+DEFAULT_NUM_FILES = 10   # 10 files ≈ 5–10 GB extracted; test split ~500MB–1GB
+
+
+def file_url(base: str, n: int) -> str:
+	"""Build the numbered URL, e.g. base + '._000003.tar.gz.1'."""
+	return f"{base}._{n:06d}.tar.gz.1"
 
 
 def root_to_https(root_url: str) -> str:
@@ -242,46 +257,97 @@ def write_splits(src: Path, splits: tuple = (0.8, 0.1, 0.1), force: bool = False
 		print(f"  [split] {name}: {out.name}  ({written / 1e9:.2f} GB)")
 
 
+def append_to_file(src: Path, dst: Path) -> int:
+	"""Append contents of src to dst. Returns bytes appended."""
+	bufsize = 4 * 1024 * 1024
+	appended = 0
+	with open(src, "rb") as fin, open(dst, "ab") as fout:
+		while True:
+			chunk = fin.read(bufsize)
+			if not chunk:
+				break
+			fout.write(chunk)
+			appended += len(chunk)
+	return appended
+
+
 def main(argv: Optional[list[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description="Download and prepare HEPMC files")
-	parser.add_argument("--force", action="store_true", help="Re-download and overwrite outputs if present")
+	parser.add_argument("--force", action="store_true", help="Re-download and overwrite all outputs")
 	parser.add_argument(
-		"--url",
-		default=ROOT_URL,
-		help="Source URL (root:// or https://). Default is the ATLAS Open Data sample.",
+		"--num-files", type=int, default=DEFAULT_NUM_FILES,
+		help=f"Number of numbered HEPMC files to download (default: {DEFAULT_NUM_FILES})",
+	)
+	parser.add_argument(
+		"--base-url", default=BASE_URL,
+		help="Base URL prefix (file number + .tar.gz.1 appended automatically).",
 	)
 	args = parser.parse_args(argv)
 
 	workdir  = Path(__file__).parent.resolve()
 	data_dir = workdir / "data"
 	data_dir.mkdir(parents=True, exist_ok=True)
-	tar_dest = workdir / Path(args.url.split("/")[-1])  # keep original filename
 	full_out = data_dir / "hepmc_full.hepmc"
 
-	# Step 1: Download
-	downloaded = download_file(args.url, tar_dest, force=args.force)
-	print(f"Downloaded to: {downloaded}")
+	if full_out.exists() and not args.force:
+		print(f"[info] {full_out} already exists ({full_out.stat().st_size / 1e9:.2f} GB). "
+			  f"Use --force to rebuild.")
+	else:
+		# Remove partial/old full file before concatenating
+		if full_out.exists():
+			full_out.unlink()
 
-	# Step 2: Extract safely to temp dir
-	with tempfile.TemporaryDirectory(prefix="hepmc_extract_") as tmpdir:
-		tmpdir_p = Path(tmpdir)
-		print(f"Extracting archive to: {tmpdir_p}")
-		safe_extract_tar(downloaded, tmpdir_p)
+		successful = 0
+		for n in range(1, args.num_files + 1):
+			url      = file_url(args.base_url, n)
+			filename = url.split("/")[-1]
+			tar_dest = workdir / filename
 
-		# Step 3: Locate HEPMC payload
-		hepmc_payload = find_hepmc_file(tmpdir_p)
-		print(f"Found HEPMC payload: {hepmc_payload}")
+			print(f"\n[file {n}/{args.num_files}] {filename}")
+			try:
+				downloaded = download_file(url, tar_dest, force=args.force)
+			except RuntimeError as e:
+				print(f"  [warning] Skipping file {n}: {e}")
+				continue
 
-		# Step 4: Copy full payload to hepmc.hepmc
-		if full_out.exists() and not args.force:
-			print(f"Skipping write; already exists: {full_out} (use --force to overwrite)")
+			with tempfile.TemporaryDirectory(prefix="hepmc_extract_") as tmpdir:
+				tmpdir_p = Path(tmpdir)
+				print(f"  Extracting...")
+				try:
+					safe_extract_tar(downloaded, tmpdir_p)
+					hepmc_payload = find_hepmc_file(tmpdir_p)
+					payload_mb = hepmc_payload.stat().st_size / 1e6
+					print(f"  Payload: {hepmc_payload.name}  ({payload_mb:.0f} MB)")
+					appended = append_to_file(hepmc_payload, full_out)
+					print(f"  Appended {appended / 1e6:.0f} MB -> "
+						  f"{full_out.stat().st_size / 1e9:.2f} GB total")
+					successful += 1
+				except Exception as e:
+					print(f"  [warning] Extract/append failed for file {n}: {e}")
+					continue
+
+			# Clean up tar after successful extract to save disk space
+			tar_dest.unlink(missing_ok=True)
+
+		if successful == 0:
+			print("\n[error] No HEPMC files were successfully downloaded and extracted.")
+			return 1
+
+		total_gb = full_out.stat().st_size / 1e9
+		print(f"\n[concat] hepmc_full.hepmc: {total_gb:.2f} GB from {successful} file(s)")
+
+		# Size check: warn if test split will be under 500 MB
+		test_gb = total_gb * 0.1
+		if test_gb < 0.5:
+			print(f"  [warning] Test split will be {test_gb*1024:.0f} MB — under 500 MB.")
+			print(f"  [warning] Re-run with --num-files {int(5 / total_gb * args.num_files) + 1} "
+				  f"to reach ~500 MB test split.")
 		else:
-			shutil.copyfile(hepmc_payload, full_out)
-			print(f"Wrote full payload to: {full_out}")
+			print(f"  Test split will be ~{test_gb*1024:.0f} MB  ✓")
 
-		# Step 5: Generate train / val / test splits (80 / 10 / 10 by raw bytes)
-		print("Generating 80/10/10 train/val/test byte splits...")
-		write_splits(full_out, force=args.force)
+	# Generate / refresh splits
+	print("\nGenerating 80/10/10 train/val/test byte splits...")
+	write_splits(full_out, force=args.force)
 
 	return 0
 

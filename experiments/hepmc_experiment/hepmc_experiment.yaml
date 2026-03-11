@@ -67,7 +67,7 @@ paths:
   log_dir:        experiments/hepmc_experiment/runs/
 
 evaluation:
-  test_data:     experiments/hepmc_experiment/data/hepmc_full_test.hepmc
+  test_data:     experiments/hepmc_experiment/data/hepmc_full.hepmc   # full 2.1 GB; use --sample-mb 1024 for 1 GB eval
   eval_interval: 1000
   eval_batches:  50
 

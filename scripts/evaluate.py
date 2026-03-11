@@ -3,6 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse, gzip, zlib, lzma, bz2, math, time, yaml
+import concurrent.futures, os
 import torch, torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -42,12 +43,18 @@ def _read_sample(path: str, max_mb: float = SAMPLE_MB) -> bytes:
 
 def _make_eval_loader(path: str, window: int, batch_size: int) -> DataLoader:
     ds = MemmapWindowDataset(path, window=window, stride=window)
+    # Use multiple workers so the CPU prepares batches ahead of the GPU.
+    # 4 workers saturate prefetch on both small and large machines without
+    # excessive memory duplication of the memmap.
+    n_workers = min(4, os.cpu_count() or 1)
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=n_workers,
+        pin_memory=True,
         drop_last=False,
+        persistent_workers=True,
     )
 
 
@@ -71,46 +78,46 @@ def run_baseline(name: str, data: bytes, compress_fn) -> dict:
 
 
 def all_baselines(data: bytes) -> list:
-    results = []
+    jobs = []
 
     for lvl in [1, 6, 9]:
-        results.append(run_baseline(
-            f"Gzip  (L{lvl})", data,
-            lambda d, l=lvl: gzip.compress(d, compresslevel=l)))
+        jobs.append((f"Gzip  (L{lvl})", data, lambda d, l=lvl: gzip.compress(d, compresslevel=l)))
 
     for lvl in [1, 6, 9]:
-        results.append(run_baseline(
-            f"Zlib  (L{lvl})", data,
-            lambda d, l=lvl: zlib.compress(d, level=l)))
+        jobs.append((f"Zlib  (L{lvl})", data, lambda d, l=lvl: zlib.compress(d, level=l)))
 
     for lvl in [1, 9]:
-        results.append(run_baseline(
-            f"Bz2   (L{lvl})", data,
-            lambda d, l=lvl: bz2.compress(d, compresslevel=l)))
+        jobs.append((f"Bz2   (L{lvl})", data, lambda d, l=lvl: bz2.compress(d, compresslevel=l)))
 
     for preset in [6, 9]:
-        results.append(run_baseline(
-            f"LZMA  (P{preset})", data,
-            lambda d, p=preset: lzma.compress(d, preset=p)))
+        jobs.append((f"LZMA  (P{preset})", data, lambda d, p=preset: lzma.compress(d, preset=p)))
 
     if ZSTD:
         for lvl in [1, 3, 9, 19]:
-            results.append(run_baseline(
-                f"Zstd  (L{lvl})", data,
-                lambda d, l=lvl: zstd.ZstdCompressor(level=l).compress(d)))
+            jobs.append((f"Zstd  (L{lvl})", data, lambda d, l=lvl: zstd.ZstdCompressor(level=l).compress(d)))
 
     if BROTLI:
         for q in [1, 6, 11]:
-            results.append(run_baseline(
-                f"Brotli(Q{q:2d})", data,
-                lambda d, qq=q: brotli.compress(d, quality=qq)))
+            jobs.append((f"Brotli(Q{q:2d})", data, lambda d, qq=q: brotli.compress(d, quality=qq)))
 
     if LZ4:
-        results.append(run_baseline(
-            "LZ4   (default)", data,
-            lambda d: lz4.compress(d)))
+        jobs.append(("LZ4   (default)", data, lambda d: lz4.compress(d)))
 
-    return results
+    # Run all baselines in parallel — compression C-extensions release the GIL,
+    # so threads achieve true parallelism.  LZMA-P9 and Brotli-Q11 on 1 GB can
+    # each take several minutes single-threaded; running them concurrently
+    # reduces wall-clock time to roughly the slowest single codec.
+    n_workers = min(len(jobs), os.cpu_count() or 1)
+    results_map: dict[str, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(run_baseline, name, d, fn): name
+                   for name, d, fn in jobs}
+        for fut in concurrent.futures.as_completed(futures):
+            r = fut.result()
+            results_map[r["name"]] = r
+
+    # Preserve original ordering
+    return [results_map[name] for name, _, _ in jobs]
 
 
 
@@ -159,8 +166,9 @@ def print_table(rows: list, vortex: dict = None):
 
 
 def eval_vortex(model, dl, vocab_size, device, amp_dtype, max_tokens=None) -> dict:
-    criterion = nn.CrossEntropyLoss()
-    total_nats, total_tokens = 0.0, 0
+    criterion = nn.CrossEntropyLoss(reduction="sum")
+    total_nats   = torch.zeros(1, device=device)
+    total_tokens = 0
     fp16     = device == "cuda"
     dev_type = device.split(":")[0]  # "cuda:0" -> "cuda"
 
@@ -185,19 +193,21 @@ def eval_vortex(model, dl, vocab_size, device, amp_dtype, max_tokens=None) -> di
             batch = batch.to(device)
             with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                 logits, _, _ = model(batch, None)
+                # Use sum reduction so we can accumulate on-GPU without .item()
                 loss = criterion(
                     logits[:, :-1].reshape(-1, vocab_size),
                     batch[:, 1:].reshape(-1),
                 )
             n_tok = batch.size(0) * (batch.size(1) - 1)
-            total_nats   += loss.item() * n_tok
+            total_nats   += loss.detach()   # stays on GPU — no sync per batch
             total_tokens += n_tok
             if max_tokens and total_tokens >= max_tokens:
                 break
 
     if device == "cuda":
         torch.cuda.synchronize()
-    elapsed = time.time() - t0
+    elapsed   = time.time() - t0
+    total_nats = total_nats.item()          # single GPU→CPU transfer at the end
 
     data_mb  = total_tokens / 1e6
     bpd      = total_nats / total_tokens / math.log(2)
