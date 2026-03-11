@@ -188,9 +188,9 @@ def encode_to_bin(arrs: ak.Array, selected: List[str]) -> Tuple[np.ndarray, BinM
 			np_arr = ak.to_numpy(a).astype(np.float32).reshape(-1, 1)
 			lengths[name] = []  # placeholder
 
-	cols.append(np_arr)
-	branches.append(BranchMeta(name=name, is_list=is_list, max_len=int(max_len), col_offset=col_offset))
-	col_offset += np_arr.shape[1]
+		cols.append(np_arr)
+		branches.append(BranchMeta(name=name, is_list=is_list, max_len=int(max_len), col_offset=col_offset))
+		col_offset += np_arr.shape[1]
 
 	data = np.concatenate(cols, axis=1).astype(np.float32)
 	meta = BinMeta(
