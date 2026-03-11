@@ -261,7 +261,6 @@ def write_event_splits(
 			f"  [split] {name}: {os.path.basename(out_path)}"
 			f"  ({end_ev - start_ev:,} events, {written / 1e9:.2f} GB)"
 		)
-			)
 		data = data.reshape(meta.n_events, total_cols)
 	return data, meta
 
