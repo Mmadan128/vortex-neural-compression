@@ -1,0 +1,128 @@
+{
+  "experiment": "hepmc_mi300x",
+  "test_file": "experiments/hepmc_experiment/data/hepmc_full.hepmc",
+  "test_size_gb": 2.089018868,
+  "model": "experiments/hepmc_experiment/checkpoints/step_0012000.pt",
+  "timestamp": "2026-03-11T03:47:28.526938Z",
+  "vortex": {
+    "bpd": 1.261946,
+    "ratio_x": 6.3394,
+    "elapsed_s": 502.74,
+    "speed_mbs": 2.14,
+    "data_mb": 1073.9
+  },
+  "baselines": [
+    {
+      "name": "Gzip  (L1)",
+      "bpd": 2.46087,
+      "ratio_x": 3.2509,
+      "elapsed_s": 10.218,
+      "speed_mbs": 105.08,
+      "vs_vortex_pct": 48.72
+    },
+    {
+      "name": "Gzip  (L6)",
+      "bpd": 2.05167,
+      "ratio_x": 3.8993,
+      "elapsed_s": 35.241,
+      "speed_mbs": 30.47,
+      "vs_vortex_pct": 38.49
+    },
+    {
+      "name": "Gzip  (L9)",
+      "bpd": 1.999752,
+      "ratio_x": 4.0005,
+      "elapsed_s": 112.695,
+      "speed_mbs": 9.53,
+      "vs_vortex_pct": 36.89
+    },
+    {
+      "name": "Zlib  (L1)",
+      "bpd": 2.46087,
+      "ratio_x": 3.2509,
+      "elapsed_s": 9.387,
+      "speed_mbs": 114.39,
+      "vs_vortex_pct": 48.72
+    },
+    {
+      "name": "Zlib  (L6)",
+      "bpd": 2.05167,
+      "ratio_x": 3.8993,
+      "elapsed_s": 34.577,
+      "speed_mbs": 31.05,
+      "vs_vortex_pct": 38.49
+    },
+    {
+      "name": "Zlib  (L9)",
+      "bpd": 1.999752,
+      "ratio_x": 4.0005,
+      "elapsed_s": 112.424,
+      "speed_mbs": 9.55,
+      "vs_vortex_pct": 36.89
+    },
+    {
+      "name": "Bz2   (L1)",
+      "bpd": 1.654992,
+      "ratio_x": 4.8339,
+      "elapsed_s": 58.913,
+      "speed_mbs": 18.23,
+      "vs_vortex_pct": 23.75
+    },
+    {
+      "name": "Bz2   (L9)",
+      "bpd": 1.556732,
+      "ratio_x": 5.139,
+      "elapsed_s": 73.238,
+      "speed_mbs": 14.66,
+      "vs_vortex_pct": 18.94
+    },
+    {
+      "name": "LZMA  (P6)",
+      "bpd": 1.524973,
+      "ratio_x": 5.246,
+      "elapsed_s": 514.05,
+      "speed_mbs": 2.09,
+      "vs_vortex_pct": 17.25
+    },
+    {
+      "name": "LZMA  (P9)",
+      "bpd": 1.501161,
+      "ratio_x": 5.3292,
+      "elapsed_s": 749.492,
+      "speed_mbs": 1.43,
+      "vs_vortex_pct": 15.94
+    },
+    {
+      "name": "Zstd  (L1)",
+      "bpd": 1.951296,
+      "ratio_x": 4.0998,
+      "elapsed_s": 2.348,
+      "speed_mbs": 457.4,
+      "vs_vortex_pct": 35.33
+    },
+    {
+      "name": "Zstd  (L3)",
+      "bpd": 2.087,
+      "ratio_x": 3.8333,
+      "elapsed_s": 4.663,
+      "speed_mbs": 230.26,
+      "vs_vortex_pct": 39.53
+    },
+    {
+      "name": "Zstd  (L9)",
+      "bpd": 1.860471,
+      "ratio_x": 4.3,
+      "elapsed_s": 19.07,
+      "speed_mbs": 56.31,
+      "vs_vortex_pct": 32.17
+    },
+    {
+      "name": "Zstd  (L19)",
+      "bpd": 1.577798,
+      "ratio_x": 5.0704,
+      "elapsed_s": 519.256,
+      "speed_mbs": 2.07,
+      "vs_vortex_pct": 20.02
+    }
+  ]
+}
