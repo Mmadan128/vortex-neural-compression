@@ -467,16 +467,18 @@ def main():
 		write_root_from_awkward(roundtrip_root, meta2.tree_key, arrs_rec)
 		print(f"[create-bin] Wrote reconstructed ROOT -> {roundtrip_root}")
 
-		# Example usage after you reconstruct:
-		# arrs_rec = reconstruct_awkward(data2, meta2)
-		t0 = time.perf_counter()
-		rntuple_path = os.path.join(args.out_dir, "cms_roundtrip_rntuple.root")
-		size_bytes = write_rntuple_from_awkward(rntuple_path, "Events", arrs_rec, compression=None)
-		t_rntuple = time.perf_counter() - t0
-		print("RNTuple entries, branches:",
-			uproot.open(rntuple_path)["Events"].num_entries,
-			len(uproot.open(rntuple_path)["Events"].keys()))
-		print("size:", size_bytes, "time_s:", t_rntuple)
+		# Optional RNTuple roundtrip — skip gracefully if uproot version doesn't support it
+		try:
+			t0 = time.perf_counter()
+			rntuple_path = os.path.join(args.out_dir, "cms_roundtrip_rntuple.root")
+			size_bytes = write_rntuple_from_awkward(rntuple_path, "Events", arrs_rec, compression=None)
+			t_rntuple = time.perf_counter() - t0
+			print("RNTuple entries, branches:",
+				uproot.open(rntuple_path)["Events"].num_entries,
+				len(uproot.open(rntuple_path)["Events"].keys()))
+			print("size:", size_bytes, "time_s:", t_rntuple)
+		except Exception as e:
+			print(f"[create-bin] RNTuple write skipped (uproot compatibility): {e}")
 		# Compare
 		f2 = uproot.open(roundtrip_root)
 		t2 = f2[meta2.tree_key]

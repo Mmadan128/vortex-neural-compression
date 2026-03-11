@@ -262,6 +262,11 @@ def main():
 
         for i, batch in enumerate(pbar):
             batch = batch.to(device, non_blocking=True)  # async H2D; GPU pipeline stays full
+            # Reset memories if batch size changed (last partial batch of epoch)
+            if memories is not None and any(
+                m is not None and m.size(0) != batch.size(0) for m in memories
+            ):
+                memories = None
             lr    = cosine_with_warmup(step, t["warmup_steps"],
                                        t["max_steps"], max_lr=t["learning_rate"])
             set_lr(optimizer, lr)
@@ -322,6 +327,10 @@ def main():
                         if _eval_i >= eval_batches:
                             break
                         vbatch = vbatch.to(device)
+                        if val_mems is not None and any(
+                            m is not None and m.size(0) != vbatch.size(0) for m in val_mems
+                        ):
+                            val_mems = None
                         with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                             vlogits, val_mems, _ = model(vbatch, val_mems)
                             vloss = criterion(
@@ -383,6 +392,10 @@ def main():
             with torch.no_grad():
                 for vbatch in val_dl:
                     vbatch = vbatch.to(device)
+                    if val_mems is not None and any(
+                        m is not None and m.size(0) != vbatch.size(0) for m in val_mems
+                    ):
+                        val_mems = None
                     with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                         vlogits, val_mems, _ = model(vbatch, val_mems)
                         vloss = criterion(
