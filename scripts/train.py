@@ -211,7 +211,8 @@ def main():
     scaler    = torch.amp.GradScaler(dev_type, enabled=(fp16 and amp_dtype == torch.float16))
     stopper   = EarlyStopping(patience=8)
     writer    = SummaryWriter(p_cfg["log_dir"])
-    criterion = nn.CrossEntropyLoss(reduction="sum")
+    criterion      = nn.CrossEntropyLoss()              # mean — used in training hot path
+    criterion_eval = nn.CrossEntropyLoss(reduction="sum")  # sum — used in eval (no .item() per batch)
 
     step, best_bpd = 0, float("inf")
 
@@ -333,7 +334,7 @@ def main():
                             val_mems = None
                         with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                             vlogits, val_mems, _ = model(vbatch, val_mems)
-                            vloss = criterion(
+                            vloss = criterion_eval(
                                 vlogits[:, :-1].reshape(-1, m["vocab_size"]),
                                 vbatch[:, 1:].reshape(-1),
                             )
@@ -398,7 +399,7 @@ def main():
                         val_mems = None
                     with torch.amp.autocast(dev_type, enabled=fp16, dtype=amp_dtype):
                         vlogits, val_mems, _ = model(vbatch, val_mems)
-                        vloss = criterion(
+                        vloss = criterion_eval(
                             vlogits[:, :-1].reshape(-1, m["vocab_size"]),
                             vbatch[:, 1:].reshape(-1),
                         )
