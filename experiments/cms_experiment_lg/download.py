@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -103,6 +104,35 @@ def xrootd_to_https(url: str) -> str:
 	return "https://eospublic.cern.ch" + path
 
 
+def _extract_first_root_uri_from_index_payload(payload: object) -> Optional[str]:
+	"""Best-effort extraction of a ROOT URI from OpenData file-index JSON."""
+	if isinstance(payload, list):
+		for item in payload:
+			if isinstance(item, dict):
+				for key in ("uri", "url"):
+					v = item.get(key)
+					if isinstance(v, str) and ".root" in v:
+						return v
+				name = item.get("filename")
+				if isinstance(name, str) and name.endswith(".root"):
+					for base in ("uri", "url", "path"):
+						v = item.get(base)
+						if isinstance(v, str):
+							return v
+	if isinstance(payload, dict):
+		for key in ("files", "entries", "data", "items"):
+			v = payload.get(key)
+			if v is not None:
+				found = _extract_first_root_uri_from_index_payload(v)
+				if found:
+					return found
+		for key in ("uri", "url"):
+			v = payload.get(key)
+			if isinstance(v, str) and ".root" in v:
+				return v
+	return None
+
+
 def resolve_cms_source_url(url: str) -> str:
 	"""Resolve OpenData record file-index URLs to a concrete ROOT file URL.
 
@@ -117,21 +147,51 @@ def resolve_cms_source_url(url: str) -> str:
 	# Expected shape: /record/<id>/files/<index_key>
 	if len(parts) >= 4 and parts[0] == "record" and parts[2] == "files":
 		record_id = parts[1]
-		index_key = parts[3]
+		index_key = urllib.parse.unquote(parts[3])
+		index_key_base = re.sub(r"_\d+$", "", index_key)
 		api_url = f"https://opendata.cern.ch/api/records/{record_id}"
 		with urllib.request.urlopen(api_url, timeout=60) as r:
 			payload = json.load(r)
 		md = payload.get("metadata", {})
 		file_indices = md.get("_file_indices", [])
+
+		# OpenData record links may use keys like "...file_index.json_12" while
+		# metadata._file_indices entries are often keyed as "...file_index.json".
+		candidates: List[dict] = []
 		for entry in file_indices:
-			if entry.get("key") == index_key:
-				files = entry.get("files", [])
-				if not files:
-					raise RuntimeError(f"OpenData index has no files: {index_key}")
-				uri = files[0].get("uri")
-				if not uri:
-					raise RuntimeError(f"Missing uri in OpenData index entry: {index_key}")
+			k = str(entry.get("key", ""))
+			if k == index_key or k == index_key_base:
+				candidates.append(entry)
+				continue
+			k_base = re.sub(r"_\d+$", "", k)
+			if k_base == index_key_base:
+				candidates.append(entry)
+
+		if not candidates and index_key_base:
+			for entry in file_indices:
+				k = str(entry.get("key", ""))
+				if index_key_base in k or k in index_key_base:
+					candidates.append(entry)
+
+		for entry in candidates:
+			files = entry.get("files", [])
+			if not files:
+				continue
+			uri = files[0].get("uri")
+			if uri:
 				return xrootd_to_https(uri)
+
+		# Fallback: fetch the file-index URL directly and parse its JSON.
+		try:
+			with urllib.request.urlopen(url, timeout=60) as r:
+				index_payload = json.load(r)
+		except Exception:
+			index_payload = None
+
+		uri = _extract_first_root_uri_from_index_payload(index_payload)
+		if uri:
+			return xrootd_to_https(uri)
+
 		raise RuntimeError(f"Could not resolve index key in record {record_id}: {index_key}")
 
 	return xrootd_to_https(url)

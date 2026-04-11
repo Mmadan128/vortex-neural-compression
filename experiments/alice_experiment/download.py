@@ -326,7 +326,12 @@ def load_numeric_arrays(tree: uproot.behaviors.TBranch.TTree, n_entries: int) ->
     return loaded
 
 
-def encode_to_bin(arrs: ak.Array, selected: List[str], max_list_len: int) -> Tuple[np.ndarray, BinMeta]:
+def encode_to_bin(
+    arrs: ak.Array,
+    selected: List[str],
+    max_list_len: int,
+    show_skip_examples: bool = True,
+) -> Tuple[np.ndarray, BinMeta]:
     n_events = len(arrs)
     cols: List[np.ndarray] = []
     branches: List[BranchMeta] = []
@@ -409,7 +414,7 @@ def encode_to_bin(arrs: ak.Array, selected: List[str], max_list_len: int) -> Tup
         f"nested-list={skip_counts['nested_list']}, "
         f"non-event-aligned={skip_counts['non_event_aligned']})"
     )
-    if skip_examples:
+    if show_skip_examples and skip_examples:
         print("[encode] first skipped examples:")
         for msg in skip_examples:
             print(f"  - {msg}")
@@ -575,19 +580,20 @@ def main() -> None:
         if not candidates:
             raise RuntimeError(f"No ROOT files found for record {args.record_id}")
 
-        # For large corpora, pick largest files first to hit target with fewer files.
+        # For large corpora, consider largest files first.
         candidates.sort(key=lambda x: x.get("size", 0), reverse=True)
         target_bytes = int(args.target_gb * 1e9)
+        candidate_pool = candidates[: args.max_files] if args.max_files > 0 else candidates
+        pool_raw_bytes = sum(int(x.get("size", 0)) for x in candidate_pool)
 
         picked: List[dict] = []
         total = 0
-        for item in candidates:
-            if args.max_files > 0 and len(picked) >= args.max_files:
-                break
-            picked.append(item)
-            total += int(item.get("size", 0))
-            if total >= target_bytes:
-                break
+        if args.large_format == "raw":
+            for item in candidate_pool:
+                picked.append(item)
+                total += int(item.get("size", 0))
+                if total >= target_bytes:
+                    break
 
         if args.bin_out == "alice_events.bin":
             args.bin_out = "alice_large.bin" if args.large_format == "float32" else "alice_raw.bin"
@@ -597,20 +603,6 @@ def main() -> None:
         raw_dir = out_dir / "raw_roots"
         ensure_dir(raw_dir)
 
-        print(
-            f"[large] Download plan: {len(picked)} files, "
-            f"~{total / 1e9:.2f} GB target={args.target_gb:.2f} GB"
-        )
-
-        downloaded_paths: List[Path] = []
-        for i, item in enumerate(picked, start=1):
-            uri = item["uri"]
-            name = f"alice_{i:04d}.root"
-            dest = raw_dir / name
-            print(f"[large] ({i}/{len(picked)}) {name}  size={item.get('size', 0) / 1e9:.3f} GB")
-            download_file(uri, dest)
-            downloaded_paths.append(dest)
-
         bin_path = out_dir / args.bin_out
         meta_path = out_dir / args.meta_out
         if bin_path.exists() and args.force:
@@ -619,6 +611,20 @@ def main() -> None:
             raise SystemExit(f"Output exists: {bin_path} (use --force)")
 
         if args.large_format == "raw":
+            print(
+                f"[large-raw] Download plan: {len(picked)} files, "
+                f"~{total / 1e9:.2f} GB target={args.target_gb:.2f} GB"
+            )
+
+            downloaded_paths: List[Path] = []
+            for i, item in enumerate(picked, start=1):
+                uri = item["uri"]
+                name = f"alice_{i:04d}.root"
+                dest = raw_dir / name
+                print(f"[large-raw] ({i}/{len(picked)}) {name}  size={item.get('size', 0) / 1e9:.3f} GB")
+                download_file(uri, dest)
+                downloaded_paths.append(dest)
+
             with open(bin_path, "wb") as fout:
                 for p in downloaded_paths:
                     with open(p, "rb") as fin:
@@ -641,6 +647,12 @@ def main() -> None:
             return
 
         # float32 large corpus mode: encode each file and append rows.
+        print(
+            f"[large-f32] Plan: up to {len(candidate_pool)} files "
+            f"(~{pool_raw_bytes / 1e9:.2f} GB raw available), "
+            f"target={args.target_gb:.2f} GB encoded"
+        )
+
         target_bytes = int(args.target_gb * 1e9)
         total_bytes = 0
         total_events = 0
@@ -649,7 +661,15 @@ def main() -> None:
         used_files: List[dict] = []
 
         with open(bin_path, "wb") as fout:
-            for p in downloaded_paths:
+            for i, item in enumerate(candidate_pool, start=1):
+                uri = item["uri"]
+                p = raw_dir / f"alice_{i:04d}.root"
+                print(
+                    f"[large-f32] ({i}/{len(candidate_pool)}) {p.name} "
+                    f"size={item.get('size', 0) / 1e9:.3f} GB"
+                )
+                download_file(uri, p)
+
                 tree_key, tree = open_tree(p, args.tree)
                 n_entries = min(args.nmax, tree.num_entries)
                 numeric_arrays = load_numeric_arrays(tree, n_entries)
@@ -659,7 +679,12 @@ def main() -> None:
                     continue
 
                 arrs = ak.zip(numeric_arrays, depth_limit=1)
-                data, meta = encode_to_bin(arrs, selected, args.max_list_len)
+                data, meta = encode_to_bin(
+                    arrs,
+                    selected,
+                    args.max_list_len,
+                    show_skip_examples=(len(used_files) == 0),
+                )
                 sig = [(b.name, b.is_list, b.max_len) for b in meta.branches]
 
                 if ref_sig is None:
@@ -688,6 +713,14 @@ def main() -> None:
                 )
                 if total_bytes >= target_bytes:
                     break
+
+        if total_bytes < target_bytes:
+            print(
+                f"[large-f32] warning: encoded target not reached "
+                f"({total_bytes / 1e9:.2f}/{args.target_gb:.2f} GB). "
+                "Increase --max-files (or remove it), use a higher-yield record, "
+                "or use --large-format raw for exact raw-byte size targets."
+            )
 
         if merged_meta is None or ref_sig is None or total_events == 0:
             raise RuntimeError("Failed to build float32 corpus: no compatible files were encoded")
