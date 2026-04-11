@@ -104,6 +104,7 @@ If `--large-format raw` is used, it creates a raw-byte corpus and writes:
 python scripts/train.py --config experiments/alice_experiment/alice_experiment.yaml
 
 # For large raw-byte corpus mode
+# For large float32 corpus mode
 python scripts/train.py --config experiments/alice_experiment/alice_raw_large.yaml
 ```
 

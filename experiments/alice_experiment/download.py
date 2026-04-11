@@ -23,8 +23,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import ssl
 import shutil
 import subprocess
+import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -220,20 +222,32 @@ def download_file(url: str, dest: Path) -> None:
             except subprocess.CalledProcessError:
                 pass
 
-    req = urllib.request.Request(https_url, headers={"User-Agent": "vortex-codec/alice"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as out:
-        total = int(resp.headers.get("Content-Length", 0))
-        got = 0
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            got += len(chunk)
-            if total > 0:
-                print(f"\r[download] {got / 1e6:.0f}/{total / 1e6:.0f} MB", end="", flush=True)
-    if total > 0:
-        print()
+    def _stream_http(context: Optional[ssl.SSLContext] = None) -> None:
+        req = urllib.request.Request(https_url, headers={"User-Agent": "vortex-codec/alice"})
+        with urllib.request.urlopen(req, timeout=120, context=context) as resp, open(dest, "wb") as out:
+            total = int(resp.headers.get("Content-Length", 0))
+            got = 0
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                got += len(chunk)
+                if total > 0:
+                    print(f"\r[download] {got / 1e6:.0f}/{total / 1e6:.0f} MB", end="", flush=True)
+        if total > 0:
+            print()
+
+    try:
+        _stream_http()
+    except urllib.error.URLError as e:
+        # Some server images (containers/proxies) expose self-signed chains.
+        if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            print("[download] SSL verify failed, retrying without certificate verification")
+            ctx = ssl._create_unverified_context()
+            _stream_http(context=ctx)
+        else:
+            raise
 
 
 def open_tree(root_path: Path, preferred_tree: Optional[str]) -> Tuple[str, uproot.behaviors.TBranch.TTree]:
