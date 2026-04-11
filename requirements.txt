@@ -26,3 +26,5 @@ tensorboard>=2.14.0
 einops>=0.7.0
 pytest>=7.0
 h5py>=3.9.0
+uproot>=5.0.0
+awkward>=2.0.0

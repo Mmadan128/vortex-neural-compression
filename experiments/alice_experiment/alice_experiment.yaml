@@ -1,0 +1,64 @@
+# ============================================================
+# ALICE ROOT Neural Compression - AMD Instinct MI300X
+# ------------------------------------------------------------
+# Dataset: ALICE ROOT sample converted to padded float32 binary
+# Script : python experiments/alice_experiment/download.py
+# ============================================================
+
+experiment:
+  name: alice_mi300x
+  description: >
+    Byte-level neural compression on ALICE ROOT data converted into
+    float32 padded binary with 80/10/10 event-level train/val/test splits.
+
+model:
+  d_model: 512
+  n_layers: 8
+  n_heads: 8
+  d_ff: 2048
+  dropout: 0.1
+  vocab_size: 256
+  use_tdt: true
+
+compressive_memory:
+  window_size: 512
+  compression_rate: 4
+
+cat:
+  enabled: true
+  chunk_sizes: [128, 256, 512]
+
+training:
+  batch_size: 256
+  grad_accumulation_steps: 1
+  learning_rate: 3e-4
+  max_steps: 300000
+  warmup_steps: 6000
+  grad_clip: 1.0
+  weight_decay: 0.01
+  mixed_precision: true
+  gradient_checkpointing: false
+  compile_model: false
+  seed: 42
+
+data:
+  window_size: 512
+  stride: 512
+  num_workers: 16
+  streaming: false
+  preload: true
+
+paths:
+  train_data: experiments/alice_experiment/data/alice_events_train.bin
+  val_data: experiments/alice_experiment/data/alice_events_val.bin
+  checkpoint_dir: experiments/alice_experiment/checkpoints/
+  log_dir: experiments/alice_experiment/runs/
+
+evaluation:
+  test_data: experiments/alice_experiment/data/alice_events_test.bin
+  eval_interval: 1000
+  eval_batches: 50
+
+logging:
+  log_interval: 100
+  save_interval: 10000

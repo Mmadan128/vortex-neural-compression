@@ -39,6 +39,20 @@ python scripts/evaluate.py \
     --config     experiments/atlas_experiment/config.yaml \
     --device     cuda \
     --batch-size 256
+
+# Other HEP datasets (same train/eval flow)
+
+# HEPMC
+python experiments/hepmc_experiment/download.py --num-files 10
+python scripts/train.py --config experiments/hepmc_experiment/hepmc_experiment.yaml
+
+# CMS (NanoAOD)
+python experiments/cms_experiment/download.py
+python scripts/train.py --config experiments/cms_experiment/cms_experiment.yaml
+
+# ALICE (ROOT)
+python experiments/alice_experiment/download.py --all-steps
+python scripts/train.py --config experiments/alice_experiment/alice_experiment.yaml
 ```
 
 ---
@@ -66,11 +80,11 @@ vortex-codec/
 │   ├── evaluate.py                      # BPD vs gzip / zlib / lzma baselines
 │   └── compress_weights.py              # apply ZipNN compression to a checkpoint
 ├── experiments/
-│   └── atlas_experiment/                # self-contained experiment
-│       ├── download.py                  # fetch ATLAS HDF5 from CERN EOS
-│       ├── config.yaml                  # experiment hyperparameters
-│       ├── data/                        # mc-flavtag-ttbar-medium.h5 + .meta.json
-│       └── checkpoints/                 # best.pt saved here
+│   ├── atlas_experiment/                # ATLAS FTAG HDF5 -> .bin splits
+│   ├── hepmc_experiment/                # ATLAS HEPMC tarballs -> .hepmc splits
+│   ├── cms_experiment/                  # CMS NanoAOD ROOT -> padded float32 .bin
+│   ├── cms_experiment_lg/               # Original large-dataset CMS pipeline
+│   └── alice_experiment/                # ALICE ROOT -> padded float32 .bin
 ├── configs/                             # hardware-specific base configs
 │   ├── colab_t4.yaml
 │   ├── rtx4070_8gb.yaml

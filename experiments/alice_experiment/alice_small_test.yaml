@@ -1,0 +1,56 @@
+experiment:
+  name: alice_small_local_test
+  description: >
+    Tiny local smoke-test config using alice_small splits.
+
+model:
+  d_model: 128
+  n_layers: 2
+  n_heads: 4
+  d_ff: 512
+  dropout: 0.1
+  vocab_size: 256
+  use_tdt: true
+
+compressive_memory:
+  window_size: 128
+  compression_rate: 4
+
+cat:
+  enabled: true
+  chunk_sizes: [64, 128]
+
+training:
+  batch_size: 8
+  grad_accumulation_steps: 1
+  learning_rate: 3e-4
+  max_steps: 20
+  warmup_steps: 5
+  grad_clip: 1.0
+  weight_decay: 0.01
+  mixed_precision: false
+  gradient_checkpointing: false
+  compile_model: false
+  seed: 42
+
+data:
+  window_size: 128
+  stride: 128
+  num_workers: 0
+  streaming: false
+  preload: true
+
+paths:
+  train_data: experiments/alice_experiment/data/alice_small_train.bin
+  val_data: experiments/alice_experiment/data/alice_small_val.bin
+  checkpoint_dir: experiments/alice_experiment/checkpoints_small_test/
+  log_dir: experiments/alice_experiment/runs_small_test/
+
+evaluation:
+  test_data: experiments/alice_experiment/data/alice_small_test.bin
+  eval_interval: 10
+  eval_batches: 5
+
+logging:
+  log_interval: 5
+  save_interval: 10

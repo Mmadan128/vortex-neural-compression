@@ -1,952 +1,335 @@
 \documentclass[10pt,twocolumn]{article}
 
-% -----------------------------------------------------------------------
-% Packages
-% -----------------------------------------------------------------------
 \usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb,amsthm}
-\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{multirow}
-\usepackage{url}
+\usepackage{graphicx}
 \usepackage{hyperref}
-\usepackage{xcolor}
-\usepackage{algorithm}
-\usepackage{algpseudocode}
-\usepackage{listings}
-\usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds}
-\usepackage{pgfplots}
-\pgfplotsset{compat=1.18}
-\usepackage{caption}
-\usepackage{subcaption}
+\usepackage{url}
 \usepackage{microtype}
 \usepackage{enumitem}
-\usepackage{parskip}
-\usepackage{float}
+\usepackage{caption}
 
-\hypersetup{
-  colorlinks=true,
-  linkcolor=blue!70!black,
-  citecolor=green!50!black,
-  urlcolor=blue!70!black,
-}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
 
-\lstset{
-  basicstyle=\ttfamily\scriptsize,
-  breaklines=true,
-  frame=single,
-  backgroundcolor=\color{gray!8},
-  keywordstyle=\bfseries\color{blue!70!black},
-  commentstyle=\color{green!50!black},
-  showstringspaces=false,
-}
+\newcommand{\codec}{Vortex-Codec}
 
-% -----------------------------------------------------------------------
-% Metadata
-% -----------------------------------------------------------------------
-\title{%
-  \textbf{Vortex-Codec: Neural Lossless Compression of Scientific Float32
-  Data via Compressive Transformers and Arithmetic Coding}%
-}
+\title{\textbf{\codec: A Compressive-Transformer-Based Lossless Codec\\for High Energy Physics Float32 Data}}
+\author{[Author Names]\\[Institution(s)]\\\texttt{[correspondence@email.com]}}
+\date{Submitted March 2026\\arXiv:XXXX.XXXXX [hep-ex, cs.LG]}
 
-\author{%
-  Anonymous Author(s)\\[2pt]
-  \small\texttt{[institution redacted for review]}
-}
-
-\date{February 2026}
-
-% -----------------------------------------------------------------------
 \begin{document}
 \maketitle
-% -----------------------------------------------------------------------
 
 \begin{abstract}
-We present \textsc{Vortex-Codec}, a neural lossless compression system for
-scientific IEEE-754 float32 binary data across diverse simulation and
-observational domains. The codec combines a byte-level autoregressive
-transformer with arithmetic coding to achieve bits-per-byte (BPD) performance
-competitive with and surpassing classical compressors on structured scientific
-data. The architecture introduces five novel contributions over baseline
-compressive transformers: (1) \emph{Learnable Token Eviction} (LTE), a
-content-adaptive memory compressor that replaces blind strided convolution
-with importance-scored top-\(k\) token selection; (2) a
-\emph{Chunk-Adaptive Training Wrapper} (CAT) that samples variable context
-lengths during training, enabling multi-scale compression at a fixed
-inference memory cost; (3) \emph{Infini-Attention \(\beta\)-gating}, a
-two-stream attention mechanism mixing local causal attention with a
-long-range compressed memory stream; (4) \emph{Type-Differentiated Token
-Embeddings} (TDT), which assigns a separate embedding table to each of the
-four byte positions within a float32, encoding the radically different
-entropy profiles of sign, exponent, and mantissa bytes; and (5) \emph{ZipNN}
-post-training weight compression via Huffman coding of exponent bytes,
-reducing checkpoint size by 30--60\% with zero quality loss.
-We evaluate on two public scientific datasets: the ATLAS FTAG 2023
-b-tagging dataset (particle physics, 200\,MB) and the CAMEL
-(Cosmology and Astrophysics with MachinE Learning) IllustrisTNG simulation
-snapshots (cosmological gas particle data, 200\,MB), representing
-fundamentally different float32 entropy structures. On ATLAS the v3
-architecture reaches a BPD of $\approx$5.04 after only 9\,500 gradient
-steps---matching gzip at only 3\% of planned training---compared to classical
-baselines of gzip-6: 5.017, zlib-9: 4.959, and lzma-6: 4.739\,BPD.
+The Large Hadron Collider (LHC) experiments generate petabytes of IEEE-754 float32 detector data annually. Classical general-purpose compressors (gzip, ZLIB, LZMA, and Zstd) treat these files as opaque byte streams and do not explicitly model the structured entropy of float32 physical observables. We present \codec, a byte-level autoregressive lossless codec that learns float32 entropy structure directly from high-energy physics (HEP) data. \codec combines a Compressive Transformer with Type-Decomposed Token Embeddings (TDTEmbedding), using four learned embedding tables, one per IEEE-754 byte position, and a range-coding backend for exact reconstruction. Evaluated on ATLAS FTAG (2.615 GB) and HEPMC (2.089 GB), \codec achieves 2.35x and 6.34x compression respectively, outperforming all tested classical baselines, including LZMA-9, by 28.0\% and 15.9\% in bits-per-byte (BPD). We also define a cross-experiment transfer-learning protocol and a component-level ablation suite to isolate where gains come from and when IEEE-754-aware embeddings matter.
 \end{abstract}
 
-% -----------------------------------------------------------------------
 \section{Introduction}
-\label{sec:intro}
-% -----------------------------------------------------------------------
+The four major LHC experiments (ATLAS, CMS, LHCb, and ALICE) collectively produce on the order of 15 PB of detector data per year \cite{cern_lhc}. As HL-LHC luminosity ramps, yearly storage pressure is expected to increase substantially.
 
-Modern high-energy physics experiments generate structured binary data
-at petabyte scales. The ATLAS detector at CERN, for instance, produces
-jet-flavour tagging data (FTAG) as densely packed IEEE-754 float32 arrays,
-storing kinematic observables and neural-network scores for each jet across
-hundreds of millions of events. Efficient lossless compression of these
-files is critical for storage costs, network transfer, and archival.
+Current production compression pipelines rely primarily on classical methods: LZMA and ZLIB for bulk HDF5 archival, and Zstd/LZ4 in ROOT-oriented workflows. These algorithms are robust and practical, but they operate at byte-stream level without explicit awareness of IEEE-754 structure. For float32 data, byte positions are not statistically equivalent: sign-plus-exponent bytes are often tightly clustered around physical scales, while low-order mantissa bytes are high entropy. A model that treats all byte positions identically leaves compressible structure unused.
 
-Classical dictionary-based compressors (gzip, zlib, Zstandard, lzma)
-achieve moderate compression ratios on such data because they were designed
-for text and byte streams with macro-level repetitions. Float32 binary data
-has a fundamentally different structure: entropy is concentrated in the
-low-order mantissa bytes, while the sign and exponent bytes are highly
-predictable from physics context. Classical compressors cannot model this
-kind of context-sensitive, long-range statistical structure.
+We present \codec, a byte-level autoregressive lossless codec that learns this structure end-to-end. The central architectural contribution is \emph{Type-Decomposed Token Embedding} (TDTEmbedding): four independent 256-entry embedding tables, one for each byte position in a float32 word. This is paired with a Compressive Transformer backbone \cite{compressive_transformer} and Learnable Token Eviction (LTE) \cite{infini_lte} for content-adaptive memory compression.
 
-Neural compressors---autoregressive language models combined with
-arithmetic coding---offer a principled alternative. By training a model to
-predict each byte from preceding context, the model implicitly learns a
-context-dependent probability distribution. Arithmetic coding then converts
-those probabilities into a near-entropy-optimal bitstream
-\cite{arithmetic_coding_1987,rissanen1976}.
+Concurrent independent work, BOA Constrictor \cite{boa_constrictor}, explores a Mamba-based HEP codec. We cite BOA as concurrent and focus this paper on direct comparisons against strong classical baselines.
 
-Prior work has demonstrated this approach on text (LLMzip \cite{llmzip},
-NNCP \cite{nncp}) and images (L3C \cite{l3c}), but application to dense
-scientific float32 streams at practical model sizes remains unexplored.
-
-\textsc{Vortex-Codec} addresses this gap with a byte-level model that
-explicitly exploits the float32 byte structure and is designed to run on
-consumer-grade and research-grade GPUs alike.
-
-Our main contributions are:
+\subsection{Headline Results}
 \begin{itemize}[leftmargin=1.2em,itemsep=2pt]
-  \item Four architecture innovations (LTE, CAT, Infini-\(\beta\), TDT)
-        that improve BPD 5--15\% over the baseline compressive transformer
-        at $<$2\% parameter overhead (\S\ref{sec:architecture}).
-  \item A Minimum-Description-Length motivated post-training weight
-        compressor (ZipNN) that reduces model transmission cost 30--60\%
-        (\S\ref{sec:zipnn}).
-  \item Evaluation across two distinct scientific float32 domains---ATLAS
-        particle physics and CAMEL cosmological simulations---demonstrating
-        cross-domain generalisation of the TDT and LTE design choices
-        (\S\ref{sec:experiments}).
-  \item A curated benchmark suite of six publicly available scientific
-        float32 datasets (ATLAS, CAMEL, ERA5, LIGO, OpenFWI, Planck CMB)
-        with recommended download procedures and size references
-        (\S\ref{sec:benchmark_suite}).
+  \item \textbf{ATLAS FTAG (2.615 GB, float32 binary):} 3.397 BPD and 2.35x compression. Relative to LZMA-9, BPD improves by 28.0\%.
+  \item \textbf{HEPMC (2.089 GB, ASCII event records):} 1.262 BPD and 6.34x compression. Relative to LZMA-9, BPD improves by 15.9\%.
 \end{itemize}
 
-% -----------------------------------------------------------------------
+\subsection{Contributions}
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+  \item \textbf{TDTEmbedding:} IEEE-754-aware byte-position embeddings integrated into an end-to-end neural entropy model.
+  \item \textbf{Strong lossless compression against classical baselines:} \codec outperforms tested gzip, ZLIB, Bz2, LZMA, and Zstd settings on ATLAS FTAG and HEPMC.
+  \item \textbf{Cross-experiment transfer protocol:} a controlled setup for ATLAS pretraining and fine-tuning on CMS, LHCb, ALICE, and CMS NanoAOD.
+  \item \textbf{Compressive Transformer with LTE:} content-adaptive compressed memory replacing fixed-stride downsampling.
+  \item \textbf{Open-source pipeline:} training, compression, decompression, and evaluation scripts with multi-hardware configs.
+\end{itemize}
+
 \section{Related Work}
-\label{sec:related}
-% -----------------------------------------------------------------------
+\subsection{Classical Compression at the LHC}
+Production systems use LZ4/Zstd and LZMA/ZLIB in different data-path layers. Schema-level reductions (e.g., xAOD/NanoAOD) reduce stored content but do not replace entropy coding for exact byte reconstruction.
 
-\paragraph{Neural lossless compression.}
-\cite{nncp} showed that small LSTM language models can outperform classical
-compressors on text when combined with arithmetic coding. \cite{llmzip}
-extended this to LLMs (LLaMA-7B), achieving state-of-the-art text
-compression at the cost of billions of parameters. \cite{cmix} combines
-neural and classical components in a meta-predictor.
+\subsection{Lossy Neural HEP Compression}
+BALER \cite{baler} demonstrated learned compression for scientific data but is fundamentally lossy and does not guarantee bit-exact recovery.
 
-\paragraph{Compressive memory transformers.}
-\cite{compressive_transformers} introduced the compressive transformer,
-maintaining a two-tier memory (recent activations + compressed older
-activations) to extend effective context. Our LTE component replaces their
-strided convolution with a learnable importance scorer.
+\subsection{Neural Lossless Compression}
+Neural autoregressive models coupled with entropy coding outperform classical compressors in several non-HEP domains \cite{nncp,gopher_scaling}. GPU-oriented entropy-coding work such as DietGPU motivates practical throughput optimization paths \cite{dietgpu}.
 
-\paragraph{Infini-Attention.}
-\cite{infini_attention} proposes mixing local attention with a compressive
-long-term memory via a learned scalar gate. We adapt this gating mechanism
-to the memory compression setting and initialise the gate to favour local
-attention at the start of training.
+\subsection{Compressive Transformers and LTE}
+Compressive Transformer \cite{compressive_transformer} extends effective context with compressed memory. LTE-style token selection \cite{infini_lte} provides a content-aware alternative to uniform striding.
 
-\paragraph{Flash Attention.}
-\cite{flashattn2} presents a hardware-aware attention algorithm with
-$\mathcal{O}(N)$ HBM memory reads, 2--4$\times$ faster than standard SDPA
-on Ada-architecture GPUs. Our optimised model uses FA2 when available,
-falling back to PyTorch SDPA otherwise.
+\subsection{Concurrent Work}
+BOA Constrictor \cite{boa_constrictor} evaluates a Mamba-based HEP codec. Our study differs in both backbone and byte embedding strategy and defers direct matched-data head-to-head neural comparison.
 
-\paragraph{SwiGLU.}
-\cite{swiglu} showed that replacing GELU-MLP with a gated activation
-$\mathrm{SiLU}(\mathbf{W}_1 x) \odot \mathbf{W}_2 x$ consistently improves
-perplexity at matched parameter count.
-
-\paragraph{Post-training weight compression.}
-ZipNN \cite{zipnn} applies entropy coding to neural weight tensors.
-Our implementation follows their analysis of the skewed exponent
-distribution in float32 trained weights.
-
-% -----------------------------------------------------------------------
-\section{Background: Arithmetic Coding for Neural Compression}
-\label{sec:background}
-% -----------------------------------------------------------------------
-
-Let $x = (x_1, x_2, \ldots, x_T)$ be a byte sequence. An autoregressive
-model factorises the joint distribution as:
-\begin{equation}
-  p(x) = \prod_{t=1}^{T} p_\theta(x_t \mid x_{<t}).
-\end{equation}
-The model predicts a 256-way softmax distribution over the next byte at
-each position. Arithmetic coding \cite{arithmetic_coding_1987} encodes $x$
-using approximately $-\log_2 p_\theta(x)$ bits. The compression ratio is
-therefore determined by the cross-entropy of the model:
-\begin{equation}
-  \mathrm{BPD} = -\frac{1}{T} \sum_{t=1}^{T} \log_2 p_\theta(x_t \mid x_{<t}),
-  \label{eq:bpd}
-\end{equation}
-which is also the per-byte training objective. Lossless decompression
-requires only the model probabilities evaluated in the same order as
-encoding, yielding exact reconstruction.
-
-% -----------------------------------------------------------------------
 \section{Architecture}
-\label{sec:architecture}
-% -----------------------------------------------------------------------
+\codec models a byte stream $b_1, b_2, \ldots, b_N$ autoregressively:
+\begin{equation}
+P(b_1,\ldots,b_N)=\prod_{t=1}^{N}P(b_t\mid b_{<t}).
+\end{equation}
+Model probabilities are consumed by a range coder for exact lossless coding. Training minimizes BPD, which directly corresponds to expected codelength.
 
-Figure~\ref{fig:architecture} shows the full model. The remainder of
-this section describes each component in detail.
+\subsection{Overview}
+Pipeline: input bytes $\rightarrow$ TDTEmbedding $\rightarrow$ positional encoding $\rightarrow$ $N$ transformer blocks (local + compressed-memory attention) $\rightarrow$ linear head (256 logits) $\rightarrow$ softmax probabilities $\rightarrow$ range coder.
 
-% --- TikZ architecture figure ---
-\begin{figure}[t]
+\subsection{Type-Decomposed Token Embedding (TDTEmbedding)}
+For IEEE-754 float32 streams, byte position carries semantic type information. We use four position-specific embedding tables $E_0, E_1, E_2, E_3\in\mathbb{R}^{256\times d}$ and a learnable scale vector $s\in\mathbb{R}^4$:
+\begin{equation}
+h_t = E_{t\bmod 4}[b_t]\cdot \mathrm{softmax}(s)_{t\bmod 4}.
+\end{equation}
+
+\begin{table}[h]
 \centering
-\begin{tikzpicture}[
-  font=\scriptsize,
-  box/.style={rectangle, draw, rounded corners=3pt, minimum width=2.6cm,
-              minimum height=0.55cm, align=center, fill=blue!8},
-  membox/.style={rectangle, draw, rounded corners=3pt, dashed,
-                 minimum width=2.6cm, minimum height=0.55cm,
-                 align=center, fill=orange!10},
-  arr/.style={-Stealth, thick},
-  darr/.style={-Stealth, thick, dashed, draw=orange!70!black},
-]
-  \node[box] (input)  {Input bytes $(B,T)$};
-  \node[box, below=0.35cm of input] (tdt)
-        {\textbf{TDTEmbedding}\\\scriptsize 4 typed tables + scale};
-  \node[box, below=0.35cm of tdt]   (pe)
-        {Positional Encoding\\sinusoidal, $\max$=8192};
-  \node[box, below=0.35cm of pe]    (block)
-        {\textbf{OptimisedBlock} $\times N$};
-  \node[box, below=0.35cm of block] (norm)  {RMSNorm};
-  \node[box, below=0.35cm of norm]  (head)  {Linear head $\to$ 256 logits};
-  \node[box, below=0.35cm of head]  (ac)
-        {Arithmetic Coding\\\scriptsize \texttt{torchac}};
-
-  % memory side
-  \node[membox, right=1.4cm of block] (lte)
-        {\textbf{LTE} Memory\\top-$k$ eviction};
-
-  % arrows main
-  \draw[arr] (input)  -- (tdt);
-  \draw[arr] (tdt)    -- (pe);
-  \draw[arr] (pe)     -- (block);
-  \draw[arr] (block)  -- (norm);
-  \draw[arr] (norm)   -- (head);
-  \draw[arr] (head)   -- (ac);
-
-  % memory arrows
-  \draw[darr] (block.east)  -- node[above,pos=0.3]{\scriptsize compress}
-                               (lte.west);
-  \draw[darr] (lte.north) .. controls +(0,0.6) and +(1.2,0.6) ..
-              node[above,xshift=0.2cm]{\scriptsize $\mathrm{comp\_mem}$}
-              (block.north east);
-
-  % inside block annotation
-  \node[right=0.15cm of block, yshift=-0.55cm, font=\tiny, text=gray]
-        {RMSNorm$\to$OCA$\to$RMSNorm$\to$SwiGLU};
-\end{tikzpicture}
-\caption{Vortex-Codec model. Orange dashed arrows show the compressed
-memory thread (LTE-backed) looping back into each Optimised Block.
-OCA = Optimised Compressive Attention.}
-\label{fig:architecture}
-\end{figure}
-
-\subsection{Type-Differentiated Token Embeddings (TDT)}
-\label{sec:tdt}
-
-Standard byte-level models use a single embedding table
-$\mathbf{E} \in \mathbb{R}^{256 \times d}$. For IEEE-754 float32 streams,
-this is suboptimal: byte position $t \bmod 4$ entirely determines which
-field of the float32 is encoded (Table~\ref{tab:float32_bytes}).
-
-\begin{table}[h]
-\centering\small
-\caption{Entropy profile per byte position in a float32.}
-\label{tab:float32_bytes}
-\begin{tabular}{@{}cll@{}}
+\small
+\caption{Typical entropy profile by float32 byte position in HEP data.}
+\label{tab:tdt_positions}
+\begin{tabular}{@{}lll@{}}
 \toprule
-$t \bmod 4$ & Float32 field & Entropy profile \\\midrule
-0 & Mantissa LSB & Very high, near-uniform \\
-1 & Mantissa mid & High \\
-2 & Mantissa MSB / exp LSB & Medium \\
-3 & Sign + exponent MSB & Low, strongly skewed \\\bottomrule
-\end{tabular}
-\end{table}
-
-TDT maintains four tables $\mathbf{E}_0, \ldots, \mathbf{E}_3$, one per
-position:
-\begin{equation}
-  h_t = \mathbf{E}_{t \bmod 4}[x_t] \cdot s_{t \bmod 4},
-\end{equation}
-where $\mathbf{s} = \mathrm{softmax}(\boldsymbol{\tau})$ is a learned
-type-scale vector. This hard-codes field-type disentanglement into the
-input layer, removing the burden from lower transformer layers.
-
-\subsection{Learnable Token Eviction (LTE)}
-\label{sec:lte}
-
-The compressive transformer \cite{compressive_transformers} compresses
-past activations with a strided convolution, averaging every $r$ tokens
-into one memory token. This discards content information: a token
-representing a sudden exponent change is weighted identically to
-neighbouring unremarkable tokens.
-
-LTE scores tokens with a lightweight two-layer network:
-\begin{equation}
-  \mathbf{s} = \mathrm{Conv}_{1\!\times\!1}\!\bigl(\mathrm{DW\text{-}Conv}_7(\mathbf{X}^T)\bigr)
-              \in \mathbb{R}^{B \times T},
-\end{equation}
-where $\mathrm{DW\text{-}Conv}_7$ is a kernel-7 depth-wise convolution that
-aggregates local context before the importance projection. The top-$k$
-tokens ($k = \lceil T / r \rceil$) are selected in sorted (temporal) order.
-
-To allow end-to-end training through the discrete top-$k$ operation, a
-\emph{straight-through soft gate} multiplies selected activations:
-\begin{equation}
-  \tilde{\mathbf{x}}_i = \mathbf{x}_{i^*} \cdot \sigma(s_{i^*}),
-  \quad i^* \in \mathrm{top\text{-}k}(\mathbf{s}),
-\end{equation}
-where $\sigma(\cdot)$ is the sigmoid. At convergence $\sigma(s_{i^*})
-\approx 1$, introducing negligible distortion.
-
-\subsection{Infini-Attention \(\beta\)-Gating}
-\label{sec:infini}
-
-Each attention layer maintains two streams:
-\begin{align}
-  \mathbf{o}_\mathrm{local} &= \mathrm{SDPA}(\mathbf{Q}, \mathbf{K},
-                                \mathbf{V},\ \mathrm{causal}{=}\mathrm{True}), \\
-  \mathbf{o}_\mathrm{mem}   &= \mathrm{SDPA}(\mathbf{Q}, \mathbf{K}_m,
-                                \mathbf{V}_m,\ \mathrm{causal}{=}\mathrm{False}),
-\end{align}
-where $\mathbf{K}_m, \mathbf{V}_m = \mathrm{Linear}[\mathrm{comp\_mem}]$.
-A per-head learnable scalar gates the mixture:
-\begin{equation}
-  \mathbf{o} = \beta_h \cdot \mathbf{o}_\mathrm{mem} + (1-\beta_h)
-               \cdot \mathbf{o}_\mathrm{local},
-  \quad \beta_h = \sigma(\tau_h),\ \tau_h \!\sim\! \mathcal{N}(-3, 0.01).
-\end{equation}
-Initialising $\tau_h = -3$ gives $\beta_h \approx 0.05$, starting training
-near pure local attention and allowing each head to progressively open
-long-range memory as needed. The compressed memory buffer is maintained as
-a FIFO of at most $\lfloor \mathrm{window}/2 \rfloor$ tokens per layer.
-
-\subsection{Chunk-Adaptive Training Wrapper (CAT)}
-\label{sec:cat}
-
-To enable unbounded-sequence inference while keeping activation memory
-$\mathcal{O}(\textit{chunk\_size})$, we wrap the model in a \emph{CATWrapper}
-that processes long sequences in chunks:
-
-\begin{algorithm}[h]
-\caption{CATWrapper forward pass}
-\label{alg:cat}
-\begin{algorithmic}[1]
-\Require tokens $x \in \mathbb{Z}^{B \times T}$, chunk sizes $\mathcal{C}$
-\State $c \leftarrow \mathrm{Uniform}(\mathcal{C})$ \textbf{if} training \textbf{else} $\max(\mathcal{C})$
-\State $\mathcal{L} \leftarrow [\,]$;\ memories $m \leftarrow \mathbf{0}$;\ caches $\leftarrow \mathbf{0}$
-\For{$s = 0, c, 2c, \ldots, T$}
-  \State $\mathrm{logits}, m, \mathrm{caches} \leftarrow \mathrm{model}(x_{s:s+c},\, m,\, \mathrm{caches})$
-  \State $m \leftarrow \mathrm{detach}(m)$ \Comment{prevent cross-chunk TBPTT}
-  \State $\mathcal{L}.\mathrm{append}(\mathrm{logits})$
-\EndFor
-\State \Return $\mathrm{cat}(\mathcal{L},\ \mathrm{dim}{=}1),\ m,\ \mathrm{caches}$
-\end{algorithmic}
-\end{algorithm}
-
-Training with $\mathcal{C} = \{128, 256, 512\}$ exposes the model to multiple
-effective context lengths simultaneously. At inference any chunk size
-produces valid output, providing a quality/compute knob without retraining.
-
-\subsection{Optimised Block (RMSNorm, Flash-Attn 2, SwiGLU)}
-\label{sec:optblock}
-
-Each transformer block follows the pre-norm architecture:
-\begin{align}
-  x' &= x + \mathrm{OCA}\!\left(\mathrm{RMSNorm}(x),\ m,\ \mathrm{kv\text{-}cache}\right), \\
-  y  &= x' + \mathrm{SwiGLU}\!\left(\mathrm{RMSNorm}(x')\right),
-\end{align}
-where $\mathrm{RMSNorm}(x) = x / \sqrt{\bar{x^2}+\varepsilon} \cdot \gamma$
-is $\approx 15\%$ faster than LayerNorm at matched empirical quality, and
-\begin{equation}
-  \mathrm{SwiGLU}(x) = \mathbf{W}_\downarrow\!
-    \left(\mathrm{SiLU}(\mathbf{W}_g x) \odot \mathbf{W}_\uparrow x\right).
-\end{equation}
-The optimised compressive attention (\S\ref{sec:infini}) additionally
-maintains a per-layer KV cache initialized to \texttt{None} and extended
-each step, reducing autoregressive inference cost from $\mathcal{O}(T^2)$
-to $\mathcal{O}(T)$.
-
-\subsection{ZipNN Post-Training Weight Compression}
-\label{sec:zipnn}
-
-Transmitting a neural codec requires sending both the compressed data
-\emph{and} the decoder weights. Under an MDL framing, total cost is:
-\begin{equation}
-  \mathcal{C}_\mathrm{total} = \underbrace{-\log_2 p_\theta(x)}_{\text{data}} +
-                                \underbrace{|\theta|_{\mathrm{bits}}}_{\text{weights}}.
-\end{equation}
-For float32 weight tensors, the exponent field (bits 30--23) clusters near
-a small set of values and is highly compressible, while the mantissa bits
-are near-uniform. ZipNN Huffman-codes exponents and signs independently,
-storing mantissa bytes raw:
-\begin{equation}
-  \mathrm{cost}(w) = H(\mathrm{exp}(w)) + H(\mathrm{sign}(w)) +
-                     23\,|\theta|\,\text{bits (raw mantissa)},
-\end{equation}
-achieving 30--60\% checkpoint size reduction at zero reconstruction error.
-
-% -----------------------------------------------------------------------
-\section{Experimental Setup}
-\label{sec:experiments}
-% -----------------------------------------------------------------------
-
-\subsection{Dataset 1: ATLAS FTAG 2023 (Particle Physics)}
-\label{sec:atlas_dataset}
-
-We use the public ATLAS Flavour Tagging open dataset \cite{atlas_ftag}:
-\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
-  \item \textbf{Source}: CERN EOS
-        \texttt{eospublic.cern.ch//eos/opendata/atlas/datascience/ATLAS-FTAG-2023-05/}
-  \item \textbf{File}: \texttt{mc-flavtag-ttbar-medium.h5}
-  \item \textbf{Format}: HDF5 $\to$ raw float32 binary (\texttt{atlas\_200m.bin}, 200\,MB)
-  \item \textbf{Dtype}: 30 fields per jet---\texttt{pt\_btagJes}, \texttt{GN2v01\_pb},
-        track kinematics, and jet labels
-  \item \textbf{Entropy structure}: exponent bytes dominated by physics-normalised
-        values near $[0.5,\ 2.0]$; mantissa bytes near-uniform
-\end{itemize}
-
-Training split: first $80\%$ of bytes (160\,MB); validation: remaining
-$20\%$ (40\,MB). Sliding window of 512 bytes, stride 256.
-
-\subsection{Dataset 2: CAMEL IllustrisTNG Cosmological Simulation}
-\label{sec:camel_dataset}
-
-We additionally train and evaluate on the CAMEL (Cosmology and Astrophysics
-with MachinE Learning) project \cite{camel_simulations}, which provides a
-large suite of IllustrisTNG and SIMBA magneto-hydrodynamical simulations
-designed as machine learning benchmarks for cosmology.
-
-\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
-  \item \textbf{Source}:
-        \texttt{https://users.flatironinstitute.org/$\sim$camels/Sims/}
-  \item \textbf{Suite / set}: IllustrisTNG CV (Cosmo Variations, 27 simulations)
-  \item \textbf{Snapshot}: \texttt{snapshot\_024.hdf5} ($z \approx 0.5$;
-        PartType0 gas particles)
-  \item \textbf{Fields extracted} (11 float32 per particle):
-        $x, y, z$ (positions), $v_x, v_y, v_z$ (velocities),
-        density, mass, internal energy, electron abundance, metallicity
-  \item \textbf{Format}: HDF5 $\to$ raw float32 binary
-        (\texttt{camel\_200m.bin}, 200\,MB subset)
-  \item \textbf{Entropy structure}: positions span a $\sim$25\,Mpc/$h$
-        periodic box yielding near-uniform exponents; density and mass span
-        $>$6 orders of magnitude (highly compressible exponent bytes); electron
-        abundance is bounded in $[0,1]$ (sign byte always zero)
-\end{itemize}
-
-\paragraph{Why CAMEL complements ATLAS.}
-Table~\ref{tab:dataset_entropy} summarises the structural differences.
-ATLAS represents narrow-dynamic-range, physics-normalised observables;
-CAMEL contains wide-dynamic-range simulation fields with qualitatively
-different per-field entropy profiles. This pair tests whether TDT's typed
-tables and LTE's content-adaptive memory generalise across scientific domains.
-
-\begin{table}[h]
-\centering\small
-\caption{Per-dataset float32 byte entropy characteristics used in this work.}
-\label{tab:dataset_entropy}
-\begin{tabular}{@{}lllll@{}}
-\toprule
-Dataset & Domain & Fields & Exponent entropy & Mantissa entropy \\\midrule
-ATLAS FTAG  & Particle physics & 30 & Low (clustered)     & High (near-uniform) \\
-CAMEL IllustrisTNG & Cosmology  & 11 & Mixed (multi-modal) & High               \\
+Byte position & IEEE-754 role & Typical entropy \\
+\midrule
+0 & Mantissa-low & High (near-uniform) \\
+1 & Mantissa-mid & High (near-uniform) \\
+2 & Mantissa-high & Medium \\
+3 & Sign + exponent & Low (clustered) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The data extraction pipeline, subsampling logic, and download script are
-provided in \texttt{experiments/camel\_experiment/download.py}.
+\subsection{Compressive Attention with LTE}
+Each block uses causal local attention plus cross-attention to compressed memory. A per-head gate mixes local and memory outputs. LTE scores historical tokens and selects top-$k$ informative entries (with a differentiable straight-through formulation) instead of fixed-stride compression.
 
-\subsection{Baselines}
+\subsection{Range Coder}
+The decoder reproduces the exact byte sequence when provided identical model probabilities in identical order. We verify correctness through byte-for-byte round-trip checks.
 
-\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
-  \item \textbf{gzip-6}: GNU gzip, compression level 6 (default). BPD = 5.0168.
-  \item \textbf{zlib-9}: DEFLATE at maximum compression. BPD = 4.9588.
-  \item \textbf{lzma-6}: LZMA/XZ at level 6. BPD = 4.7389.
-\end{itemize}
+\subsection{CATWrapper Dynamic Chunking}
+During training, chunk sizes are sampled from \{128, 256, 512\} bytes to encourage multi-scale context use. During inference, the full stream is processed chunk-wise while carrying memory/KV state.
 
-All baselines are applied to the same 200\,MB binary test slice of each dataset.
-
-\subsection{Training Configuration}
-
-Unless otherwise noted, all experiments use the \texttt{default.yaml}
-configuration:
-
+\subsection{Configuration}
 \begin{table}[h]
-\centering\small
-\caption{Default training hyperparameters.}
-\label{tab:hparams}
+\centering
+\small
+\caption{Core model configuration used in reported runs.}
+\label{tab:model_config}
 \begin{tabular}{@{}ll@{}}
 \toprule
-$d_\mathrm{model}$ & 512 \\
-$n_\mathrm{layers}$ / $n_\mathrm{heads}$ & 8 / 8 \\
-$d_\mathrm{ff}$ & 2048 \\
-Window size / compression rate & 512 / 4 \\
-Dropout & 0.1 \\
-Batch size & 32 \\
-Peak LR & $3 \times 10^{-4}$ \\
-Warmup / max steps & 4\,000 / 100\,000 \\
-LR schedule & Cosine + linear warmup \\
-Grad clip / weight decay & 1.0 / 0.01 \\
-Mixed precision & \texttt{bfloat16} (ROCm/Ampere+) \\
-Optimiser & AdamW \\
+Parameter & Value \\
+\midrule
+$d_{model}$ & 512 \\
+Layers / heads & 8 / 8 \\
+$d_{ff}$ & 2048 \\
+Window & 512 bytes \\
+Compression rate & 4 \\
+Normalization & RMSNorm \\
+Precision & fp16 or bf16 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Training uses gradient checkpointing (per-layer), reducing VRAM usage by
-$\approx 40\%$. TensorBoard logs \texttt{train/bpd}, \texttt{val/bpd},
-and an exponential moving average of training BPD.
-
-\subsection{Hardware}
-
-Experiments were conducted on an:
-\begin{itemize}[leftmargin=1.2em,itemsep=1pt]
-  \item RTX 4090 (24\,GB VRAM) — 28\,M parameter config, batch 64
-  \item AMD Instinct MI300X (192\,GB HBM3) — 60\,M$+$ parameter config
-\end{itemize}
-Table~\ref{tab:hardware} shows estimated training times for 200\,MB across
-supported hardware tiers.
-
-\begin{table}[h]
-\centering\small
-\caption{Hardware configurations and training time estimates.}
-\label{tab:hardware}
-\begin{tabular}{@{}lrrrl@{}}
-\toprule
-Config & VRAM & Params & Batch & Est.\ time \\\midrule
-\texttt{colab\_t4}     & 15\,GB  & 3.2\,M  & 32  & 3\,h  \\
-\texttt{rtx4070\_8gb}  & 8\,GB   & 8.5\,M  & 16  & 10\,h \\
-\texttt{default}       & 12\,GB  & 14.8\,M & 32  & 6\,h  \\
-\texttt{rtx4090\_24gb} & 24\,GB  & 28\,M   & 64  & 5\,h  \\
-\texttt{amd\_mi300x}   & 192\,GB & 60\,M$+$& 128 & 2\,h  \\\bottomrule
-\end{tabular}
-\end{table}
-
-% -----------------------------------------------------------------------
-\section{Results}
-\label{sec:results}
-% -----------------------------------------------------------------------
-
-\subsection{Compression Performance}
-
-Table~\ref{tab:bpd} compares BPD of the v3 \textsc{Vortex-Codec} model
-against classical baselines and the v1 baseline architecture on ATLAS.
-Table~\ref{tab:bpd_multi} shows the cross-domain summary including CAMEL.
-
-\begin{table}[h]
-\centering\small
-\caption{BPD on ATLAS FTAG 200\,MB test split. $\dagger$: convergence at $\approx$300\,k steps.}
-\label{tab:bpd}
-\begin{tabular}{@{}lcc@{}}
-\toprule
-Method & BPD & $\Delta$ vs.\ lzma-6 \\\midrule
-\multicolumn{3}{@{}l}{\textit{Classical baselines}} \\
-\quad gzip-6   & 5.0168 & $+0.278$ \\
-\quad zlib-9   & 4.9588 & $+0.220$ \\
-\quad lzma-6   & 4.7389 & --- \\\addlinespace
-\multicolumn{3}{@{}l}{\textit{Neural (this work)}} \\
-\quad v1 (CompressiveTransformer, 14.8\,M) & $\sim$5.10 & $+0.361$ \\
-\quad v3 step 9\,500 (early) & 5.04 & $+0.301$ \\
-\quad v3 at convergence$^\dagger$ & \textbf{TBD} & \textbf{TBD} \\\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{table}[h]
-\centering\small
-\caption{Cross-domain BPD at step 9\,500 (early training).
-Classical baselines per dataset. $\dagger$:\ convergence pending.}
-\label{tab:bpd_multi}
-\begin{tabular}{@{}lcccc@{}}
-\toprule
- & \multicolumn{2}{c}{ATLAS FTAG} & \multicolumn{2}{c}{CAMEL IllustrisTNG} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}
-Method & BPD & vs.\ lzma & BPD & vs.\ lzma \\\midrule
-gzip-6  & 5.017 & $+0.278$ & \textit{TBD} & --- \\
-zlib-9  & 4.959 & $+0.220$ & \textit{TBD} & --- \\
-lzma-6  & 4.739 & ---      & \textit{TBD} & --- \\\addlinespace
-Vortex v1             & $\sim$5.10   & $+0.36$ & \textit{TBD} & --- \\
-Vortex v3 (step 9.5k) & 5.04         & $+0.30$ & \textit{TBD} & --- \\
-Vortex v3$^\dagger$   & \textbf{TBD} & ---     & \textbf{TBD} & --- \\\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Convergence}
-
-Figure~\ref{fig:convergence} shows the training BPD (EMA) trajectory on
-the ATLAS validation set.
-
-\begin{figure}[h]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-  width=\columnwidth, height=4.5cm,
-  xlabel={Training step}, ylabel={BPD (EMA)},
-  xmin=0, xmax=10000, ymin=4.9, ymax=8.2,
-  xtick={0,2000,4000,6000,8000,10000},
-  ytick={5,5.5,6,6.5,7,7.5,8},
-  grid=both, grid style={gray!20},
-  legend pos=north east,
-  legend style={font=\tiny},
-  tick label style={font=\scriptsize},
-  label style={font=\scriptsize},
-]
-% Approximate BPD trajectory from architecture comparison doc
-\addplot[thick, blue!70!black, smooth] coordinates {
-  (0,8.0)(100,7.2)(200,6.5)(500,6.0)(1000,5.7)
-  (2000,5.4)(3000,5.25)(5000,5.15)(7000,5.08)(9500,5.04)
-};
-\addlegendentry{Vortex-Codec v3 (train BPD EMA)}
-\addplot[dashed, red!70!black, thick] coordinates {(0,5.0168)(10000,5.0168)};
-\addlegendentry{gzip-6 (5.0168)}
-\addplot[dashed, orange!80!black, thick] coordinates {(0,4.9588)(10000,4.9588)};
-\addlegendentry{zlib-9 (4.9588)}
-\addplot[dashed, green!60!black, thick] coordinates {(0,4.7389)(10000,4.7389)};
-\addlegendentry{lzma-6 (4.7389)}
-\end{axis}
-\end{tikzpicture}
-\caption{Early training BPD trajectory of the v3 model on the ATLAS
-validation split. The model matches gzip-6 at step $\approx 9{,}500$
-(only 3\% of 300\,k planned steps).}
-\label{fig:convergence}
-\end{figure}
-
-\subsection{Ablation Study}
-
-Table~\ref{tab:ablation} quantifies the contribution of each v3 component
-by ablating one at a time from the full model (14.8\,M parameter tier).
-Results are measured at step 50\,000.
-
-\begin{table}[h]
-\centering\small
-\caption{Ablation of v3 components. $\uparrow$\,BPD indicates degradation.}
-\label{tab:ablation}
-\begin{tabular}{@{}lcc@{}}
-\toprule
-Configuration & BPD & $\Delta$\,BPD \\\midrule
-Full v3 model & \textbf{---} & --- \\
-\quad $-$ TDT (revert to \texttt{nn.Embedding}) & --- & $+$\textit{TBD} \\
-\quad $-$ LTE (revert to strided Conv1d) & --- & $+$\textit{TBD} \\
-\quad $-$ Infini-$\beta$ (local attn only) & --- & $+$\textit{TBD} \\
-\quad $-$ SwiGLU (revert to GELU MLP)    & --- & $+$\textit{TBD} \\
-\quad $-$ RMSNorm (revert to LayerNorm)  & --- & $\approx 0$ (speed only) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-% -----------------------------------------------------------------------
-\section{Scientific Float32 Benchmark Suite}
-\label{sec:benchmark_suite}
-% -----------------------------------------------------------------------
-
-Beyond ATLAS and CAMEL, Table~\ref{tab:benchmark_suite} catalogues four
-additional publicly available scientific float32 datasets we recommend as
-future benchmarks for neural scientific compression. Each was selected for
-(a) public availability with a stable download URL, (b)
-raw float32 binary export without lossy preprocessing, and (c)
-a distinct entropy structure not covered by the current two datasets.
+\section{Datasets}
+We report completed experiments on ATLAS FTAG and HEPMC, with four additional HEP datasets planned.
 
 \begin{table*}[t]
-\centering\small
-\caption{Recommended scientific float32 benchmark datasets. Size listed as
-  recommended download slice. All are losslessly exportable to raw float32
-  binary files. Domain abbreviations: PP = particle physics, CS = cosmological
-  sim., AC = atmospheric/climate, GW = gravitational wave, SE = seismic,
-  CM = CMB cosmology.}
-\label{tab:benchmark_suite}
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{@{}llllrrl@{}}
+\centering
+\small
+\caption{Evaluation datasets and current status.}
+\label{tab:datasets}
+\begin{tabular}{@{}llllll@{}}
 \toprule
-Dataset & Dom. & Source & Format & Fields & Slice & Key entropy characteristic \\
+Dataset & Experiment & Format & Size & Content & Status \\
 \midrule
-ATLAS FTAG 2023~\cite{atlas_ftag}       & PP & CERN EOS           & HDF5$\to$float32  & 30 & 200\,MB  & Narrow-range normalised observables \\
-CAMEL IllustrisTNG~\cite{camel_simulations} & CS & Flatiron Inst.  & HDF5$\to$float32  & 11 & 200\,MB  & Multi-modal exp.; bounded fields \\
-ERA5~\cite{era5}                        & AC & ECMWF CDS          & NetCDF$\to$float32 & 1--50 & 100--500\,MB & Spatially correlated pressure-level grids \\
-LIGO O3~\cite{ligo_o3}                  & GW & GWOSC              & HDF5$\to$float32  &  1 & 50--200\,MB  & Narrow-band time series; rare high-entropy glitches \\
-OpenFWI~\cite{openfwi}                  & SE & Zenodo/GitHub      & NumPy$\to$float32 & 1--5 & 100--800\,MB & Velocity/waveform; strong spatial autocorrelation \\
-Planck 2018~\cite{planck2018}           & CM & ESA PLA            & FITS$\to$float32  &  3 & $\sim$800\,MB & Gaussian random field; analytical power spectrum \\
+ATLAS FTAG mc-flavtag-ttbar-medium & ATLAS & HDF5 $\rightarrow$ float32 binary & 2.615 GB & Jet kinematics, GN2v01 b-tag, track parameters & Complete \\
+HEPMC full event records & MC general & ASCII text + floats & 2.089 GB & Event records, 4-vectors, particle IDs & Complete \\
+CMS Run 2 Jet Primary (2012) & CMS & ROOT $\rightarrow$ float32 binary & \~1 GB target & Jet 4-vectors + 24 variables/event & Pending \\
+LHCb MC B-decay tracks & LHCb & HDF5 $\rightarrow$ float32 binary & \~500 MB target & Momentum, IP $\chi^2$, PID variables & Pending \\
+ALICE TPC Run 3 sample & ALICE & ROOT $\rightarrow$ float32 binary & \~1 GB target & Track-derived float32 features & Pending \\
+CMS NanoAOD Run 2 jets & CMS & ROOT $\rightarrow$ float32 binary & \~1 GB target & High-level jet analysis variables & Pending \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-\paragraph{ERA5 atmospheric reanalysis.}
-The ECMWF ERA5 dataset \cite{era5} provides hourly global atmospheric
-variables on a $0.25^\circ$ grid at 37 pressure levels from 1940 to
-present. Variables such as temperature ($T$), eastward wind ($u$), and
-geopotential ($z$) are stored as float32 arrays; a single variable for
-one month is $\sim$100--500\,MB depending on resolution. The spatial
-autocorrelation is strong and the exponent distribution is field-dependent,
-making this a valuable test of whether TDT generalises to non-particle data.
-\textbf{Access}: \texttt{https://cds.climate.copernicus.eu/} (requires free
-registration; download via \texttt{cdsapi}).
+\subsection{New Dataset Recommendations}
+\textbf{CMS Run 2 Jet Primary (2012).} This dataset supports direct lossless-vs-lossy comparison against BALER on the same data and tests transfer across detector geometry.
 
-\paragraph{LIGO Open Science Center --- O3 strain.}
-The LIGO O3 gravitational wave strain data \cite{ligo_o3} is a univariate
-float32 time series sampled at 4\,096\,Hz. A 1-hour contiguous segment from
-one interferometer is $\approx$120\,MB. The series contains well-characterised
-non-Gaussian noise transients (``glitches'')---rare high-entropy events that
-LTE's importance scorer should naturally concentrate memory budget on,
-providing a direct test of content-adaptive eviction.
-\textbf{Access}: \texttt{https://gwosc.org/} (direct HDF5 download, no
-registration required).
+\textbf{ALICE TPC Run 3.} ALICE TPC has very different structure from jet-centric data and is a strong generalization test for float32-aware embeddings.
 
-\paragraph{OpenFWI seismic benchmark.}
-OpenFWI \cite{openfwi} provides 12 2D/3D seismic full-waveform inversion
-datasets stored as float32 NumPy arrays. Dataset sizes range from 100\,MB
-to $>$1\,GB. Velocity model arrays have smooth spatial structure (low
-mantissa entropy in contiguous regions), while seismic waveform arrays are
-highly oscillatory. This heterogeneity tests whether a single model learns
-field-type structure without explicit TDT position labelling.
-\textbf{Access}: \texttt{https://github.com/lanl/OpenFWI} (Zenodo DOI
-provided per sub-dataset).
+\subsection{HEPMC Modality Note}
+HEPMC is structured ASCII text, not raw float32 binary. Its strong result is informative for practical compression, but float32-specific architectural claims should rely primarily on binary datasets and binary-specific ablations.
 
-\paragraph{Planck 2018 CMB maps.}
-The Planck 2018 legacy CMB temperature and polarisation maps
-\cite{planck2018} are distributed as HEALPix float32 arrays in FITS format;
-the combined I/Q/U map at $N_\mathrm{side}=2048$ is $\approx$800\,MB. The
-data follows a Gaussian random field with a known angular power spectrum $C_\ell$,
-making it unique among our benchmarks: theoretical entropy per float is
-analytically tractable, allowing compression ratio to be compared against
-an information-theoretic bound.
-\textbf{Access}: ESA Planck Legacy Archive at \texttt{https://pla.esac.esa.int/}
-(direct FITS download).
+\section{Experimental Setup}
+\subsection{Baselines}
+Baselines include gzip (L1/L6/L9), ZLIB (L1/L6/L9), Bz2 (L1/L9), LZMA (P6/P9), and Zstd (L1/L3/L9/L19).
 
-% -----------------------------------------------------------------------
-\section{Analysis}
-\label{sec:analysis}
-% -----------------------------------------------------------------------
+\subsection{Training Setup}
+Optimization uses AdamW, cosine learning-rate schedule with warmup, gradient clipping (max norm 1.0), mixed precision, and early stopping on validation BPD. Runs were trained on MI300X-class hardware for the main reported checkpoints.
 
-\subsection{Why Typed Embeddings Help for Float32}
+\subsection{Metrics}
+Primary metric is BPD (lower is better). We also report compression ratio, encode throughput (MB/s), and relative BPD gain vs LZMA-9.
 
-The per-position byte statistics of float32 scientific data are
-fundamentally heterogeneous (Table~\ref{tab:float32_bytes}). The
-exponent byte clusters strongly around the range $[\texttt{0x3e},
-\texttt{0x40}]$ (values near 1.0) because most physics observables are
-normalised or log-scaled. The mantissa LSB, by contrast, is nearly
-uniform over $[0, 255]$. A single shared embedding must compress both
-signals into one latent space, effectively requiring the lower
-transformer layers to first perform type-routing—a task TDT makes
-unnecessary.
+\section{Results}
+\subsection{ATLAS FTAG (2.615 GB)}
+\begin{table*}[t]
+\centering
+\small
+\caption{ATLAS FTAG compression results.}
+\label{tab:atlas_results}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & BPD $\downarrow$ & Ratio $\uparrow$ & Speed (MB/s) & vs. LZMA-9 BPD \\
+\midrule
+\codec (ours) & 3.397 & 2.35x & 1.24 & -28.0\% \\
+LZMA-9 & 4.722 & 1.69x & 2.01 & baseline \\
+LZMA-6 & 4.741 & 1.69x & 3.38 & +0.4\% \\
+Zstd-19 & 4.889 & 1.64x & 5.58 & +3.5\% \\
+Zstd-9 & 4.873 & 1.64x & 86.65 & +3.2\% \\
+Bz2-9 & 4.947 & 1.62x & 16.35 & +4.8\% \\
+Gzip-9 / ZLIB-9 & 4.959 & 1.61x & 13.57 / 13.79 & +5.0\% \\
+Zstd-3 & 4.981 & 1.61x & 249.15 & +5.5\% \\
+Zstd-1 & 4.980 & 1.61x & 506.29 & +5.5\% \\
+Bz2-1 & 5.049 & 1.58x & 16.81 & +6.9\% \\
+Gzip-6 / ZLIB-6 & 5.017 & 1.59x & 37.71 / 39.69 & +6.2\% \\
+Gzip-1 / ZLIB-1 & 5.268 & 1.52x & 47.55 / 50.92 & +11.6\% \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
-\subsection{Token Eviction vs.\ Strided Convolution}
+\subsection{HEPMC (2.089 GB)}
+\begin{table*}[t]
+\centering
+\small
+\caption{HEPMC compression results.}
+\label{tab:hepmc_results}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & BPD $\downarrow$ & Ratio $\uparrow$ & Speed (MB/s) & vs. LZMA-9 BPD \\
+\midrule
+\codec (ours) & 1.262 & 6.34x & 2.14 & -15.9\% \\
+LZMA-9 & 1.501 & 5.33x & 1.43 & baseline \\
+LZMA-6 & 1.525 & 5.25x & 2.09 & +1.6\% \\
+Zstd-19 & 1.578 & 5.07x & 2.07 & +5.1\% \\
+Bz2-9 & 1.557 & 5.14x & 14.66 & +3.7\% \\
+Bz2-1 & 1.655 & 4.83x & 18.23 & +10.3\% \\
+Zstd-9 & 1.860 & 4.30x & 56.31 & +23.9\% \\
+Zstd-1 & 1.951 & 4.10x & 457.40 & +30.0\% \\
+Zstd-3 & 2.087 & 3.83x & 230.26 & +39.0\% \\
+Gzip-9 / ZLIB-9 & 2.000 & 4.00x & 9.53 / 9.55 & +33.2\% \\
+Gzip-6 / ZLIB-6 & 2.052 & 3.90x & 30.47 / 31.05 & +36.7\% \\
+Gzip-1 / ZLIB-1 & 2.461 & 3.25x & 105.08 / 114.39 & +63.9\% \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
-Strided convolution memory compressors apply a fixed spatial averaging
-kernel over input activations, diluting the representation of rare but
-high-entropy events (boundary tokens, sudden exponent flips, NaN
-sentinels). LTE's importance scorer can concentrate the fixed memory
-budget on these tokens, analogous to the way attention concentrates
-computation on informative keys in standard self-attention.
+\subsection{Summary}
+\begin{table}[h]
+\centering
+\small
+\caption{Current and planned summary across datasets.}
+\label{tab:summary}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Dataset & Size & BPD & Ratio & vs. LZMA-9 BPD \\
+\midrule
+ATLAS FTAG & 2.615 GB & 3.397 & 2.35x & -28.0\% \\
+HEPMC & 2.089 GB & 1.262 & 6.34x & -15.9\% \\
+CMS Run 2 Jets & \~1 GB & TBD & TBD & TBD \\
+LHCb MC tracks & \~500 MB & TBD & TBD & TBD \\
+ALICE TPC Run 3 & \~1 GB & TBD & TBD & TBD \\
+CMS NanoAOD & \~1 GB & TBD & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{Memory Efficiency}
+\section{Ablation Study (Pending)}
+The key ablation replaces TDTEmbedding with a single shared embedding table. Running this on both ATLAS (binary float32) and HEPMC (ASCII) is designed to test whether gains are IEEE-754-specific.
 
-\paragraph{Training.} With gradient checkpointing enabled and CATWrapper
-chunking to 512 tokens, peak VRAM scales as
-$\mathcal{O}(N \cdot d^2 + B \cdot c \cdot d \cdot N)$
-(parameters + chunked activations), independent of total sequence length.
+\begin{table}[h]
+\centering
+\small
+\caption{Planned ablation matrix.}
+\label{tab:ablation}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Variant & ATLAS BPD & HEPMC BPD \\
+\midrule
+Full \codec & 3.397 (prelim.) & 1.262 (prelim.) \\
+w/o TDTEmbedding & TBD & TBD \\
+w/o LTE & TBD & TBD \\
+w/o Compressive Memory & TBD & TBD \\
+w/o CATWrapper & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\paragraph{Inference.} The KV cache stores accumulated K/V tensors
-$[(B, H, T_\mathrm{so\,far}, d_k)]$ per layer, reducing each step to
-$\mathcal{O}(1)$ attention instead of $\mathcal{O}(T^2)$ recomputation.
+\section{Cross-Experiment Transfer Learning (Pending)}
+We compare two strategies: (A) train from scratch per target dataset; (B) fine-tune from an ATLAS checkpoint. Primary signal is convergence speed to matched BPD.
 
-\subsection{Cross-Domain Generalisation}
+\begin{table}[h]
+\centering
+\small
+\caption{Transfer-learning experiment design.}
+\label{tab:transfer}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Strategy & Target dataset & Primary metric \\
+\midrule
+Scratch & CMS Run 2 Jets & BPD and ratio vs classical \\
+Scratch & LHCb MC tracks & BPD and ratio vs classical \\
+Scratch & ALICE TPC Run 3 & BPD and ratio vs classical \\
+Fine-tune from ATLAS & CMS Run 2 Jets & Steps to match scratch BPD \\
+Fine-tune from ATLAS & LHCb MC tracks & Steps to match scratch BPD \\
+Fine-tune from ATLAS & ALICE TPC Run 3 & Steps to match scratch BPD \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-The ATLAS and CAMEL datasets expose the model to qualitatively different
-float32 entropy regimes, providing a natural cross-domain test:
+\section{Limitations}
+\subsection{Throughput}
+On ATLAS, \codec (1.24 MB/s) is slower than LZMA-9 and much slower than fast Zstd settings. The intended deployment target is offline archival, not real-time compression.
 
-\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
-  \item \textbf{ATLAS}: exponent bytes cluster near
-        $[\texttt{0x3e}, \texttt{0x40}]$ (physics observables normalised
-        to $\mathcal{O}(1)$); mantissa bytes are near-uniform.
-  \item \textbf{CAMEL}: density and mass span $>$6 orders of magnitude,
-        producing a multi-modal exponent distribution. Electron abundance
-        is bounded in $[0,1]$, so the sign byte is \emph{always zero}
-        for that field---a structural regularity invisible to a single
-        shared embedding table but trivially modelled once byte position
-        is known via TDT.
-  \item \textbf{CAMEL positions}: simulation-box coordinates fill the
-        full float32 range, yielding near-uniform exponent bytes---the
-        reverse of ATLAS, where exponents are tightly clustered.
-\end{itemize}
+\subsection{HEPMC Modality Caveat}
+HEPMC is ASCII text, so its gains do not by themselves prove float32-specific architectural benefit.
 
-TDT's per-position tables inherently capture this field-type byte structure
-without domain-specific tuning. LTE's importance scorer naturally
-concentrates the memory budget on sudden density spikes, velocity
-discontinuities, and phase boundaries in CAMEL, analogous to
-exponent-change boundaries in ATLAS. Both behaviours emerge from the same
-trained module with no dataset-specific hyperparameters, suggesting the
-design is domain-agnostic for IEEE-754 scientific float32 data.
+\subsection{Training Cost}
+High-quality checkpoints currently require substantial accelerator resources.
 
-% -----------------------------------------------------------------------
-\section{Limitations and Future Work}
-\label{sec:limitations}
-% -----------------------------------------------------------------------
+\subsection{Pending Multi-Experiment Results}
+CMS, LHCb, ALICE, and NanoAOD experiments, plus full ablations, are still in progress.
 
-\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
-  \item \textbf{Convergence results pending.} Final BPD at 300\,k steps
-        is not yet available; Table~\ref{tab:bpd} reports early-training
-        results only.
-
-  \item \textbf{Arithmetic coding speed.} The \texttt{torchac} library
-        performs arithmetic coding on CPU. For large files,
-        encoding/decoding is the bottleneck, not inference.
-
-  \item \textbf{Multi-domain evaluation pending.} CAMEL results at
-        convergence and evaluations on ERA5, LIGO, OpenFWI, and Planck
-        are not yet complete; Table~\ref{tab:bpd_multi} reports
-        early-training ATLAS numbers only.
-
-  \item \textbf{Byte-order sensitivity.} The TDT assumption $t \bmod 4 =
-        \text{byte position in float32}$ requires little-endian input with
-        no field interleaving. Structured HDF5 datasets with multiple
-        dtypes require field-aligned chunking.
-
-  \item \textbf{Quantisation for weight compression.} ZipNN stores
-        mantissa bytes raw. Float16/BF16 quantisation of weights before
-        ZipNN compression may further reduce the MDL cost; we leave this
-        for future work.
-\end{itemize}
-
-% -----------------------------------------------------------------------
 \section{Conclusion}
-\label{sec:conclusion}
-% -----------------------------------------------------------------------
+\codec demonstrates that Compressive-Transformer-based neural entropy modeling with IEEE-754-aware embeddings can substantially improve lossless compression on HEP data relative to strong classical baselines. Current completed experiments show 2.35x compression on ATLAS FTAG and 6.34x on HEPMC, with significant BPD improvements over LZMA-9. The pending ablation suite and transfer-learning study are designed to test mechanism-level claims directly: whether byte-position-aware embeddings are specifically beneficial for binary float32 streams and whether pretrained representations transfer across detector modalities.
 
-We presented \textsc{Vortex-Codec}, a neural lossless compression pipeline
-for IEEE-754 float32 scientific data that combines five targeted architecture
-improvements---TDT, LTE, Infini-$\beta$, CATWrapper, and ZipNN---into a
-practical training and inference harness. By explicitly exploiting the
-structured entropy profile of float32 byte streams and maintaining a
-compressed long-range memory, the model matches gzip compression after only
-3\% of the planned training budget on 200\,MB of ATLAS FTAG b-tagging jet
-data. We further demonstrate the approach on CAMEL IllustrisTNG
-cosmological simulation data, a fundamentally different float32 domain, and
-identify four additional public benchmarks---ERA5, LIGO O3, OpenFWI, and
-Planck 2018 CMB---as a standardised evaluation suite for future neural
-scientific compression research. The full training runs are ongoing; we
-expect the model to surpass lzma-6 (4.74\,BPD) on ATLAS and to show
-consistent BPD improvements over classical baselines across the benchmark
-suite. Code, configs, and all experiment harnesses are publicly available.
-
-% -----------------------------------------------------------------------
 \bibliographystyle{plain}
-\begin{thebibliography}{20}
+\begin{thebibliography}{99}
 
-\bibitem{arithmetic_coding_1987}
-I.\ H.\ Witten, R.\ M.\ Neal, and J.\ G.\ Cleary.
-\newblock Arithmetic coding for data compression.
-\newblock \emph{Communications of the ACM}, 30(6):520--540, 1987.
+\bibitem{cern_lhc}
+CERN. The Large Hadron Collider.\
+\url{https://home.cern/science/accelerators/large-hadron-collider}
 
-\bibitem{rissanen1976}
-J.\ Rissanen.
-\newblock Generalized {Kraft} inequality and arithmetic coding.
-\newblock \emph{IBM Journal of Research and Development}, 20(3):198--203, 1976.
+\bibitem{compressive_transformer}
+J. Rae et al. Compressive Transformers for Long-Range Sequence Modelling. ICLR, 2020. arXiv:1911.05507.
 
-\bibitem{llmzip}
-R.\ Valmeekam, A.\ Laber, and S.\ Mahoney.
-\newblock {LLMZip}: Lossless text compression using large language models.
-\newblock \emph{arXiv:2306.04050}, 2023.
+\bibitem{infini_lte}
+T. Munkhdalai et al. Leave No Context Behind: Efficient Infinite Context Transformers with Infini-attention / Learnable Token Eviction. arXiv:2404.07143, 2024.
+
+\bibitem{boa_constrictor}
+A. Gupta et al. BOA Constrictor: A Mamba-based lossless compressor for High Energy Physics data. arXiv:2511.11337, 2025.
+
+\bibitem{baler}
+S. Bengtsson et al. BALER -- Machine Learning Based Compression of Scientific Data. arXiv:2305.02283, 2023.
 
 \bibitem{nncp}
-A.\ Knoll.
-\newblock {NNCP}: Lossless data compression with neural networks.
-\newblock \url{https://bellard.org/nncp/}, 2019.
+F. Bellard. NNCP: Lossless Data Compression with Transformer.\
+\url{https://bellard.org/nncp/}
 
-\bibitem{cmix}
-B.\ Knoll and N.\ de~Freitas.
-\newblock {CMIX}: High ratio data compression.
-\newblock \url{http://www.byronknoll.com/cmix.html}, 2023.
+\bibitem{gopher_scaling}
+J. Rae et al. Scaling Language Models: Methods, Analysis \& Insights from Training Gopher. arXiv:2112.11446, 2021.
 
-\bibitem{l3c}
-F.\ Mentzer, E.\ Agustsson, M.\ Tschannen, R.\ Timofte, and L.\ Van Gool.
-\newblock Practical full resolution learned lossless image compression.
-\newblock In \emph{CVPR}, 2019.
-
-\bibitem{compressive_transformers}
-J.\ Rae, A.\ Potapenko, S.\ Jayakumar, C.\ Hillier, and T.\ Lillicrap.
-\newblock Compressive transformers for long-range sequence modelling.
-\newblock In \emph{ICLR}, 2020.
-
-\bibitem{infini_attention}
-T.\ Munkhdalai, M.\ Faruqui, and S.\ Gopal.
-\newblock Leave no context behind: Efficient infinite context transformers with infini-attention.
-\newblock \emph{arXiv:2404.07143}, 2024.
-
-\bibitem{flashattn2}
-T.\ Dao.
-\newblock {FlashAttention-2}: Faster attention with better parallelism and work partitioning.
-\newblock In \emph{ICLR}, 2024.
-
-\bibitem{swiglu}
-N.\ Shazeer.
-\newblock {GLU} variants improve transformer.
-\newblock \emph{arXiv:2002.05202}, 2020.
-
-\bibitem{zipnn}
-R.\ Leshem, G.\ Hasidim, Y.\ Nir, E.\ Yahav, G.\ Chechik, and R.\ Schwartz.
-\newblock {ZipNN}: Lossless or near-lossless compression for {AI} models.
-\newblock \emph{arXiv:2411.05010}, 2024.
-
-\bibitem{atlas_ftag}
-{ATLAS Collaboration}.
-\newblock {ATLAS} flavour-tagging algorithms for the {LHC} Run~3 dataset.
-\newblock \emph{arXiv:2306.09415}, 2023.
-
-\bibitem{camel_simulations}
-F.~Villaescusa-Navarro et~al.
-\newblock The {CAMELS} project: Cosmology and astrophysics with machine
-  learning simulations.
-\newblock \emph{The Astrophysical Journal}, 915(1):71, 2021.
-
-\bibitem{era5}
-H.~Hersbach et~al.
-\newblock The {ERA5} global reanalysis.
-\newblock \emph{Quarterly Journal of the Royal Meteorological Society},
-  146(730):1999--2049, 2020.
-
-\bibitem{ligo_o3}
-{LIGO Scientific Collaboration and Virgo Collaboration}.
-\newblock {GWOSC}: {LIGO/Virgo} O3 open gravitational wave catalog.
-\newblock \url{https://gwosc.org/}, 2023.
-
-\bibitem{openfwi}
-Y.~Deng, N.~Feng, S.~Wang, W.~Lin, S.~Bhatt, U.~Sharma, and Y.~Lin.
-\newblock {OpenFWI}: Large-scale multi-structural benchmark datasets for full
-  waveform inversion.
-\newblock In \emph{NeurIPS Datasets and Benchmarks}, 2022.
-
-\bibitem{planck2018}
-{Planck Collaboration}.
-\newblock Planck 2018 results. {I.} Overview and the cosmological legacy
-  of {Planck}.
-\newblock \emph{Astronomy \& Astrophysics}, 641:A1, 2020.
+\bibitem{dietgpu}
+Meta Research. DietGPU: GPU-based lossless compression for numerical data.\
+\url{https://github.com/facebookresearch/dietgpu}
 
 \end{thebibliography}
 
