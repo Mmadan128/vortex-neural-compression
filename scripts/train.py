@@ -87,6 +87,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="experiments/atlas_experiment/config.yaml")
     p.add_argument("--resume", default=None)
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     return p.parse_args()
 
 
@@ -106,7 +107,16 @@ def main():
         torch.backends.cudnn.allow_tf32       = True
     torch.backends.cudnn.benchmark = True
 
-    device   = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif args.device == "cuda":
+        if not torch.cuda.is_available():
+            print("\n[ERROR] --device cuda requested but CUDA/ROCm is not available.\n")
+            sys.exit(2)
+        device = "cuda"
+    else:
+        device = "cpu"
+
     dev_type = device.split(":")[0]  # "cuda:0" -> "cuda"
 
     amp_dtype = get_amp_dtype(device)
@@ -178,7 +188,8 @@ def main():
     d, p_cfg = cfg["data"], cfg["paths"]
     if not os.path.exists(p_cfg["train_data"]):
         print(f"\n[ERROR] Training data not found: {p_cfg['train_data']}")
-        print("  Run: python experiments/atlas_experiment/download.py --all-steps\n")
+        print(f"  Check your config paths in: {args.config}")
+        print("  Generate matching dataset files (download/conversion) for that config.\n")
         sys.exit(1)
 
     train_bytes = os.path.getsize(p_cfg["train_data"])

@@ -1,7 +1,7 @@
 experiment:
   name: alice_raw_large
   description: >
-    Large ALICE corpus from multi-file float32 feature encoding,
+    Large ALICE corpus from multi-file raw ROOT-byte concatenation,
     tuned for AMD Instinct MI300X.
 
 model:
@@ -42,13 +42,13 @@ data:
   preload: true
 
 paths:
-  train_data: experiments/alice_experiment/data/alice_large_train.bin
-  val_data: experiments/alice_experiment/data/alice_large_val.bin
+  train_data: experiments/alice_experiment/data/alice_raw_train.bin
+  val_data: experiments/alice_experiment/data/alice_raw_val.bin
   checkpoint_dir: experiments/alice_experiment/checkpoints_large/
   log_dir: experiments/alice_experiment/runs_large/
 
 evaluation:
-  test_data: experiments/alice_experiment/data/alice_large_test.bin
+  test_data: experiments/alice_experiment/data/alice_raw_test.bin
   eval_interval: 1000
   eval_batches: 50
 
