@@ -24,6 +24,8 @@ import argparse
 import json
 import os
 import sys
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -90,6 +92,51 @@ def ensure_dir(path: str) -> None:
 	os.makedirs(path, exist_ok=True)
 
 
+def xrootd_to_https(url: str) -> str:
+	"""Convert eospublic xrootd URL to HTTPS mirror URL when possible."""
+	prefix = "root://eospublic.cern.ch/"
+	if not url.startswith(prefix):
+		return url
+	path = url[len(prefix):]
+	if not path.startswith("/"):
+		path = "/" + path
+	return "https://eospublic.cern.ch" + path
+
+
+def resolve_cms_source_url(url: str) -> str:
+	"""Resolve OpenData record file-index URLs to a concrete ROOT file URL.
+
+	If URL is already a direct ROOT path (https/root://), return as-is (with
+	eospublic root:// converted to HTTPS for aria2c compatibility).
+	"""
+	if url.endswith(".root") or "/.root" in url or url.startswith("root://"):
+		return xrootd_to_https(url)
+
+	parsed = urllib.parse.urlparse(url)
+	parts = [p for p in parsed.path.split("/") if p]
+	# Expected shape: /record/<id>/files/<index_key>
+	if len(parts) >= 4 and parts[0] == "record" and parts[2] == "files":
+		record_id = parts[1]
+		index_key = parts[3]
+		api_url = f"https://opendata.cern.ch/api/records/{record_id}"
+		with urllib.request.urlopen(api_url, timeout=60) as r:
+			payload = json.load(r)
+		md = payload.get("metadata", {})
+		file_indices = md.get("_file_indices", [])
+		for entry in file_indices:
+			if entry.get("key") == index_key:
+				files = entry.get("files", [])
+				if not files:
+					raise RuntimeError(f"OpenData index has no files: {index_key}")
+				uri = files[0].get("uri")
+				if not uri:
+					raise RuntimeError(f"Missing uri in OpenData index entry: {index_key}")
+				return xrootd_to_https(uri)
+		raise RuntimeError(f"Could not resolve index key in record {record_id}: {index_key}")
+
+	return xrootd_to_https(url)
+
+
 def download_file(url: str, dest_path: str, chunk_size: int = 1 << 20, timeout: float = 60.0) -> None:
 	"""Download a file over HTTP(S) to dest_path.
 
@@ -97,20 +144,46 @@ def download_file(url: str, dest_path: str, chunk_size: int = 1 << 20, timeout: 
 	vs single-threaded urllib on CERN OpenData servers.
 	Falls back to urllib if aria2c is not installed.
 	"""
-	import shutil, subprocess
+	import shutil
+	import subprocess
 	if shutil.which("aria2c"):
-		print(f"        [aria2c] 16 connections → {dest_path}")
-		cmd = [
+		print(f"        [aria2c] 16 connections -> {dest_path}")
+		fast_cmd = [
 			"aria2c",
 			"--split=16",
 			"--max-connection-per-server=16",
 			"--min-split-size=10M",
 			"--file-allocation=none",
+			"--allow-overwrite=true",
+			"--continue=true",
 			"--out", os.path.basename(dest_path),
 			"--dir", os.path.dirname(os.path.abspath(dest_path)) or ".",
 			url,
 		]
-		subprocess.run(cmd, check=True)
+		if url.startswith("https://eospublic.cern.ch"):
+			fast_cmd.insert(1, "--check-certificate=false")
+		try:
+			subprocess.run(fast_cmd, check=True)
+			return
+		except subprocess.CalledProcessError as e:
+			# Some CERN endpoints reject multi-range requests; retry in single-stream mode.
+			print(f"        [aria2c] fast mode failed ({e.returncode}); retrying single-connection")
+
+		safe_cmd = [
+			"aria2c",
+			"--split=1",
+			"--max-connection-per-server=1",
+			"--min-split-size=1G",
+			"--file-allocation=none",
+			"--allow-overwrite=true",
+			"--continue=false",
+			"--out", os.path.basename(dest_path),
+			"--dir", os.path.dirname(os.path.abspath(dest_path)) or ".",
+			url,
+		]
+		if url.startswith("https://eospublic.cern.ch"):
+			safe_cmd.insert(1, "--check-certificate=false")
+		subprocess.run(safe_cmd, check=True)
 	else:
 		print(f"        [urllib] aria2c not found, using single-threaded download")
 		import urllib.request
@@ -142,6 +215,17 @@ def open_tree(file_url_or_path: str) -> Tuple[uproot.reading.ReadOnlyDirectory, 
 		raise RuntimeError("No TTree found in ROOT file")
 	tree = f[tree_key]
 	return f, tree_key, tree
+
+
+def validate_root_file(path: str) -> bool:
+	"""Quickly validate that a local ROOT file is readable and contains a TTree."""
+	try:
+		f, _, _ = open_tree(path)
+		f.close()
+		return True
+	except Exception as e:
+		print(f"[prep] Existing ROOT appears invalid: {e}")
+		return False
 
 
 def select_numeric_branches(arrs: ak.Array) -> List[str]:
@@ -424,11 +508,25 @@ def main():
 	# Resolve local ROOT file path: download to <out-dir>/cms.root if missing
 	local_root = os.path.join(args.out_dir, "cms.root")
 	if os.path.exists(local_root):
-		print(f"[prep] Found existing ROOT: {local_root} (skipping download)")
+		print(f"[prep] Found existing ROOT: {local_root}")
+		if validate_root_file(local_root):
+			print("[prep] Existing ROOT is valid (skipping download)")
+		else:
+			print("[prep] Removing corrupted ROOT and re-downloading")
+			os.remove(local_root)
+			print(f"[prep] Resolving ROOT source from: {args.url}")
+			root_src = resolve_cms_source_url(args.url)
+			if root_src != args.url:
+				print(f"[prep] Resolved to: {root_src}")
+			print(f"[prep] Downloading ROOT -> {local_root}\n        from: {root_src}")
+			download_file(root_src, local_root)
+			print(f"[prep] Download complete: {local_root}")
 	else:
 		print(f"[prep] Resolving ROOT source from: {args.url}")
-		root_src = args.url
-		print(f"[prep] Downloading ROOT → {local_root}\n        from: {root_src}")
+		root_src = resolve_cms_source_url(args.url)
+		if root_src != args.url:
+			print(f"[prep] Resolved to: {root_src}")
+		print(f"[prep] Downloading ROOT -> {local_root}\n        from: {root_src}")
 		download_file(root_src, local_root)
 		print(f"[prep] Download complete: {local_root}")
 

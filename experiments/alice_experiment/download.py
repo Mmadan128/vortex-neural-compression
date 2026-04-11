@@ -74,6 +74,17 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def is_valid_root_file(path: Path) -> bool:
+    """Return True if ROOT file can be opened and contains at least one key."""
+    try:
+        with uproot.open(path) as f:
+            # Force key read; catches many truncated/corrupt ROOT files.
+            _ = list(f.keys())
+        return True
+    except Exception:
+        return False
+
+
 def root_to_https(url: str) -> str:
     prefix = "root://eospublic.cern.ch/"
     if not url.startswith(prefix):
@@ -190,8 +201,13 @@ def list_record_root_files(record_id: str) -> List[dict]:
 
 def download_file(url: str, dest: Path) -> None:
     if dest.exists():
-        print(f"[download] Reusing existing file: {dest}")
-        return
+        if is_valid_root_file(dest):
+            print(f"[download] Reusing existing file: {dest}")
+            return
+        print(f"[download] Existing file is invalid, re-downloading: {dest}")
+        dest.unlink(missing_ok=True)
+        part = Path(str(dest) + ".aria2")
+        part.unlink(missing_ok=True)
 
     ensure_dir(dest.parent)
     https_url = root_to_https(url)
@@ -209,7 +225,11 @@ def download_file(url: str, dest: Path) -> None:
         ]
         try:
             subprocess.check_call(cmd)
-            return
+            if is_valid_root_file(dest):
+                return
+            print("[download] aria2c produced an invalid ROOT file, retrying via fallback")
+            dest.unlink(missing_ok=True)
+            Path(str(dest) + ".aria2").unlink(missing_ok=True)
         except subprocess.CalledProcessError:
             pass
 
@@ -218,7 +238,10 @@ def download_file(url: str, dest: Path) -> None:
         if xrdcp:
             try:
                 subprocess.check_call([xrdcp, "-f", "--insecure", url, str(dest)])
-                return
+                if is_valid_root_file(dest):
+                    return
+                print("[download] xrdcp produced an invalid ROOT file, retrying via HTTPS stream")
+                dest.unlink(missing_ok=True)
             except subprocess.CalledProcessError:
                 pass
 
@@ -248,6 +271,9 @@ def download_file(url: str, dest: Path) -> None:
             _stream_http(context=ctx)
         else:
             raise
+
+    if not is_valid_root_file(dest):
+        raise RuntimeError(f"Downloaded file is not a valid ROOT file: {dest}")
 
 
 def open_tree(root_path: Path, preferred_tree: Optional[str]) -> Tuple[str, uproot.behaviors.TBranch.TTree]:
