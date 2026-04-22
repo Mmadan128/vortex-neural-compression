@@ -209,7 +209,15 @@ class OptimisedCompressiveTransformer(nn.Module):
     def forward(self, x: torch.Tensor, memories=None, kv_caches=None):
         if memories  is None: memories  = [None] * len(self.layers)
         if kv_caches is None: kv_caches = [None] * len(self.layers)
-        h = self.pe(self.embed(x))
+        pos_offset = 0
+        if kv_caches and kv_caches[0] is not None:
+            pos_offset = kv_caches[0]["k"].size(2)
+
+        if self.use_tdt:
+            h = self.embed(x, position_offset=pos_offset)
+        else:
+            h = self.embed(x)
+        h = self.pe(h, position_offset=pos_offset)
         new_mems, new_caches = [], []
         for layer, mem, cache in zip(self.layers, memories, kv_caches):
             h, new_mem, new_cache = self._run_layer(layer, h, mem, cache)

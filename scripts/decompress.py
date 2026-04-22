@@ -8,11 +8,11 @@ from tqdm import tqdm
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
 from vortex.compression.range_coder_gpu import (
-    StreamDecoder, make_gpu_cdf, RANGE_CODER_AVAILABLE,
+    StreamDecoder, make_gpu_cdf,
 )
 from vortex.utils.training import load_checkpoint
 
-MAGIC = b"VXC2"   # must match compressor
+MAGIC = b"VXC3"   # must match compressor
 
 
 def parse_args():
@@ -22,6 +22,8 @@ def parse_args():
     p.add_argument("--output", required=True)
     p.add_argument("--config", default="experiments/atlas_experiment/config.yaml")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--use-memory", action="store_true",
+                   help="Enable cross-chunk compressed memory during decode (must match encode)")
     return p.parse_args()
 
 
@@ -36,6 +38,7 @@ def main():
         n_layers=m["n_layers"],    n_heads=m["n_heads"],
         d_ff=m["d_ff"],            window=c["window_size"],
         compression_rate=c["compression_rate"],
+        use_tdt=m.get("use_tdt", False),
     ).to(args.device)
     load_checkpoint(model, args.model, device=args.device)
     model.eval()
@@ -43,7 +46,7 @@ def main():
     with open(args.input, "rb") as f:
         magic = f.read(4)
         assert magic == MAGIC, (
-            f"{args.input}: expected magic {MAGIC} (VXC2 lossless format), "
+            f"{args.input}: expected magic {MAGIC} (VXC3 lossless format), "
             f"got {magic}. Re-compress with the updated compress.py."
         )
         original_size = struct.unpack(">Q", f.read(8))[0]
@@ -57,48 +60,41 @@ def main():
     use_amp    = (args.device == "cuda")
 
     output   = []
-    memories = None          # cross-chunk infini-attention state
+    memories = None          # cross-chunk infini-attention state (optional)
     SOS      = torch.zeros(1, 1, dtype=torch.long, device=args.device)  # start-of-sequence
     t0       = time.time()
 
     with torch.no_grad():
         for blob in tqdm(blobs, desc="Decompressing"):
-            # ── Autoregressive decode ──────────────────────────────────────
-            # Mirror of compress.py's shifted-input logic:
-            #   encode used probs from model([SOS, x_0, …, x_{T-2}], memories)
-            #   so decode must reconstruct exactly those probs, token by token.
-            #
-            # With KV cache: each step is a single-token forward pass O(1)
-            # attention instead of O(t) re-processing from scratch.
-            dec       = StreamDecoder(blob)   # stateful range-coder reader
+            # Mirror compress.py: first byte is raw, remaining bytes are range-coded.
+            if len(blob) == 0:
+                raise ValueError("Invalid chunk payload: missing first raw byte")
+
+            first_sym = int(blob[0])
+            dec       = StreamDecoder(blob[1:]) if len(blob) > 1 else None
             kv_caches = None
-            x_in      = SOS                   # first input is SOS (= 0)
-            decoded   = []
+            decoded   = [first_sym]
+            x_in      = torch.tensor([[first_sym]], dtype=torch.long, device=args.device)
 
             with torch.amp.autocast(amp_device, enabled=use_amp):
-                for _ in range(chunk_size):
-                    # Single-token forward — uses memories as infini-attention
-                    # context (fixed for whole chunk) and grows kv_caches.
+                for _ in range(chunk_size - 1):
                     probs_step, _, kv_caches = model.get_probs(
-                        x_in, memories, kv_caches
+                        x_in,
+                        memories if args.use_memory else None,
+                        kv_caches,
                     )
-
-                # probs_step[:, -1, :] = P(next_token | all seen so far, memories)
                     cdf_row = make_gpu_cdf(probs_step[:, -1:, :].float())[0]  # (257,)
-                    sym     = dec.decode_symbol(cdf_row)   # recovers x[t] exactly
+                    sym     = dec.decode_symbol(cdf_row) if dec is not None else 0
                     decoded.append(sym)
-
-                    # Feed decoded symbol back as next input
                     x_in = torch.tensor([[sym]], dtype=torch.long, device=args.device)
 
-            # ── Memory update (mirrors compress.py exactly) ───────────────
-            # Run the full recovered chunk through the model to produce the
-            # same cross-chunk memory state that compress.py computed.
-            x_full = torch.tensor(decoded, dtype=torch.long,
-                                  device=args.device).unsqueeze(0)  # (1, T)
-            with torch.amp.autocast(amp_device, enabled=use_amp):
-                _, memories, _ = model(x_full, memories)
-            memories = [mm.detach() if mm is not None else None for mm in memories]
+            # Optional memory update. Must mirror encode setting exactly.
+            if args.use_memory:
+                x_full = torch.tensor(decoded, dtype=torch.long,
+                                      device=args.device).unsqueeze(0)  # (1, T)
+                with torch.amp.autocast(amp_device, enabled=use_amp):
+                    _, memories, _ = model(x_full, memories)
+                memories = [mm.detach() if mm is not None else None for mm in memories]
 
             output.extend(decoded)
 

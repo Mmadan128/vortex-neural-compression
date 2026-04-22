@@ -550,6 +550,11 @@ def main():
 	parser.add_argument("--create-bin", action="store_true", help="Download, select first N events, and write .bin + .meta.json")
 	parser.add_argument("--bin-out", default="cms_large_padded.bin", help="Output .bin filename (float32 matrix)")
 	parser.add_argument("--meta-out", default=None, help="Output metadata JSON filename (default: bin name + .meta.json)")
+	parser.add_argument(
+		"--skip-roundtrip",
+		action="store_true",
+		help="Skip expensive reconstruct/write/compare validation after bin creation",
+	)
 
 	# Validation path: take an external decompressed bin and fit/verify against original
 	parser.add_argument("--validate-bin", action="store_true", help="Validate an external decompressed .bin against the original ROOT")
@@ -617,12 +622,26 @@ def main():
 		print("[create-bin] Generating 80/10/10 train/val/test splits...")
 		write_event_splits(bin_path, meta, force=True)
 
+		if args.skip_roundtrip:
+			print("[create-bin] Skipping round-trip reconstruction and comparison (--skip-roundtrip)")
+			return
+
 		# Round-trip from our own bin and compare
+		print("[create-bin] Loading bin+meta for round-trip validation...")
+		t0 = time.perf_counter()
 		data2, meta2 = read_bin_and_meta(bin_path, meta_path)
+		print(f"[create-bin] Loaded bin+meta in {time.perf_counter() - t0:.1f}s")
+
+		print("[create-bin] Reconstructing awkward arrays from bin...")
+		t0 = time.perf_counter()
 		arrs_rec = reconstruct_awkward(data2, meta2)
+		print(f"[create-bin] Reconstructed arrays in {time.perf_counter() - t0:.1f}s")
+
 		roundtrip_root = os.path.join(args.out_dir, "cms_roundtrip.root")
+		print(f"[create-bin] Writing reconstructed ROOT -> {roundtrip_root}")
+		t0 = time.perf_counter()
 		write_root_from_awkward(roundtrip_root, meta2.tree_key, arrs_rec)
-		print(f"[create-bin] Wrote reconstructed ROOT -> {roundtrip_root}")
+		print(f"[create-bin] Wrote reconstructed ROOT in {time.perf_counter() - t0:.1f}s -> {roundtrip_root}")
 
 		# Optional RNTuple roundtrip — skip gracefully if uproot version doesn't support it
 		try:
@@ -637,10 +656,13 @@ def main():
 		except Exception as e:
 			print(f"[create-bin] RNTuple write skipped (uproot compatibility): {e}")
 		# Compare
+		print("[create-bin] Comparing original and reconstructed arrays...")
+		t0 = time.perf_counter()
 		f2 = uproot.open(roundtrip_root)
 		t2 = f2[meta2.tree_key]
 		arrs2 = t2.arrays(library="ak")
 		ok, report = compare_trees(arrs, arrs2, selected)
+		print(f"[create-bin] Comparison phase completed in {time.perf_counter() - t0:.1f}s")
 		report_path = os.path.join(args.out_dir, "compare_report.txt")
 		with open(report_path, "w", encoding="utf-8") as f:
 			f.write("Round-trip comparison report (create-bin)\n")

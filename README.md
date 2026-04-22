@@ -81,6 +81,7 @@ vortex-codec/
 │   └── compress_weights.py              # apply ZipNN compression to a checkpoint
 ├── experiments/
 │   ├── atlas_experiment/                # ATLAS FTAG HDF5 -> .bin splits
+│   ├── camel_experiment/                # CAMEL HDF5 -> raw + float32 .bin splits
 │   ├── hepmc_experiment/                # ATLAS HEPMC tarballs -> .hepmc splits
 │   ├── cms_experiment/                  # CMS NanoAOD ROOT -> padded float32 .bin
 │   ├── cms_experiment_lg/               # Original large-dataset CMS pipeline

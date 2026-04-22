@@ -254,6 +254,7 @@ def main():
     eval_interval = cfg.get("evaluation", {}).get("eval_interval", 5000)
     recent_bpds   = deque(maxlen=20)
     train_bpd_ema = None
+    raw_bpd       = None
     t0            = time.time()
     # Derive epoch from step so set_epoch() doesn't repeat shuffle order on resume
     steps_per_epoch = max(1, len(train_dl))
@@ -361,10 +362,15 @@ def main():
 
                 elapsed_h = (time.time() - t0) / 3600
                 eta_h     = elapsed_h / max(step, 1) * (t["max_steps"] - step)
+                train_bpd_for_log = (
+                    train_bpd_ema
+                    if train_bpd_ema is not None
+                    else (raw_bpd if raw_bpd is not None else 0.0)
+                )
 
                 print_scoreboard(
                     step        = step,
-                    train_bpd   = train_bpd_ema or raw_bpd,
+                    train_bpd   = train_bpd_for_log,
                     val_bpd     = val_bpd,
                     best_bpd    = best_bpd,
                     baselines   = baselines,

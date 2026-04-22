@@ -1,0 +1,128 @@
+{
+  "experiment": "camel_experiment",
+  "test_file": "experiments/camel_experiment/data/camel_test.bin",
+  "test_size_gb": 0.0008,
+  "model": "experiments/camel_experiment/checkpoints/best.pt",
+  "timestamp": "2026-04-22T16:58:35.196612Z",
+  "vortex": {
+    "bpd": 6.186699,
+    "ratio_x": 1.2931,
+    "elapsed_s": 175.16,
+    "speed_mbs": 0.0,
+    "data_mb": 0.8
+  },
+  "baselines": [
+    {
+      "name": "Gzip  (L1)",
+      "bpd": 7.58302,
+      "ratio_x": 1.055,
+      "elapsed_s": 0.044,
+      "speed_mbs": 18.24,
+      "vs_vortex_pct": 18.41
+    },
+    {
+      "name": "Gzip  (L6)",
+      "bpd": 7.58082,
+      "ratio_x": 1.0553,
+      "elapsed_s": 0.041,
+      "speed_mbs": 19.35,
+      "vs_vortex_pct": 18.39
+    },
+    {
+      "name": "Gzip  (L9)",
+      "bpd": 7.58082,
+      "ratio_x": 1.0553,
+      "elapsed_s": 0.048,
+      "speed_mbs": 16.68,
+      "vs_vortex_pct": 18.39
+    },
+    {
+      "name": "Zlib  (L1)",
+      "bpd": 7.5829,
+      "ratio_x": 1.055,
+      "elapsed_s": 0.044,
+      "speed_mbs": 18.0,
+      "vs_vortex_pct": 18.41
+    },
+    {
+      "name": "Zlib  (L6)",
+      "bpd": 7.5807,
+      "ratio_x": 1.0553,
+      "elapsed_s": 0.048,
+      "speed_mbs": 16.6,
+      "vs_vortex_pct": 18.39
+    },
+    {
+      "name": "Zlib  (L9)",
+      "bpd": 7.5807,
+      "ratio_x": 1.0553,
+      "elapsed_s": 0.04,
+      "speed_mbs": 20.04,
+      "vs_vortex_pct": 18.39
+    },
+    {
+      "name": "Bz2   (L1)",
+      "bpd": 7.76832,
+      "ratio_x": 1.0298,
+      "elapsed_s": 0.062,
+      "speed_mbs": 12.91,
+      "vs_vortex_pct": 20.36
+    },
+    {
+      "name": "Bz2   (L9)",
+      "bpd": 7.65655,
+      "ratio_x": 1.0449,
+      "elapsed_s": 0.07,
+      "speed_mbs": 11.5,
+      "vs_vortex_pct": 19.2
+    },
+    {
+      "name": "LZMA  (P6)",
+      "bpd": 7.17004,
+      "ratio_x": 1.1158,
+      "elapsed_s": 0.119,
+      "speed_mbs": 6.72,
+      "vs_vortex_pct": 13.71
+    },
+    {
+      "name": "LZMA  (P9)",
+      "bpd": 7.17004,
+      "ratio_x": 1.1158,
+      "elapsed_s": 0.129,
+      "speed_mbs": 6.22,
+      "vs_vortex_pct": 13.71
+    },
+    {
+      "name": "Zstd  (L1)",
+      "bpd": 7.5577,
+      "ratio_x": 1.0585,
+      "elapsed_s": 0.005,
+      "speed_mbs": 149.66,
+      "vs_vortex_pct": 18.14
+    },
+    {
+      "name": "Zstd  (L3)",
+      "bpd": 7.56378,
+      "ratio_x": 1.0577,
+      "elapsed_s": 0.004,
+      "speed_mbs": 180.57,
+      "vs_vortex_pct": 18.21
+    },
+    {
+      "name": "Zstd  (L9)",
+      "bpd": 7.55774,
+      "ratio_x": 1.0585,
+      "elapsed_s": 0.007,
+      "speed_mbs": 109.5,
+      "vs_vortex_pct": 18.14
+    },
+    {
+      "name": "Zstd  (L19)",
+      "bpd": 7.55616,
+      "ratio_x": 1.0587,
+      "elapsed_s": 0.056,
+      "speed_mbs": 14.18,
+      "vs_vortex_pct": 18.12
+    }
+  ]
+}

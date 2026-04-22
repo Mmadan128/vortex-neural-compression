@@ -7,12 +7,10 @@ import torch, numpy as np
 from tqdm import tqdm
 
 from vortex.models.optimized_transformer import OptimisedCompressiveTransformer
-from vortex.compression.range_coder_gpu import (
-    gpu_encode, theoretical_bpd, RANGE_CODER_AVAILABLE,
-)
+from vortex.compression.range_coder_gpu import gpu_encode, theoretical_bpd
 from vortex.utils.training import load_checkpoint
 
-MAGIC = b"VXC2"   # bumped version: shifted-input lossless format
+MAGIC = b"VXC3"   # first-byte-raw + next-token range-coded format
 
 
 def parse_args():
@@ -22,6 +20,8 @@ def parse_args():
     p.add_argument("--output", required=True)
     p.add_argument("--config", default="experiments/atlas_experiment/config.yaml")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--use-memory", action="store_true",
+                   help="Enable cross-chunk compressed memory during encode (must match decode)")
     return p.parse_args()
 
 
@@ -36,6 +36,7 @@ def main():
         n_layers=m["n_layers"],    n_heads=m["n_heads"],
         d_ff=m["d_ff"],            window=c["window_size"],
         compression_rate=c["compression_rate"],
+        use_tdt=m.get("use_tdt", False),
     ).to(args.device)
     load_checkpoint(model, args.model, device=args.device)
     model.eval()
@@ -56,31 +57,36 @@ def main():
     t0                    = time.time()
     compressed_chunks     = []
     total_bpd             = 0.0
-    memories              = None          # cross-chunk infini-attention state
-    SOS                   = torch.zeros(1, 1, dtype=torch.long, device=args.device)
+    memories              = None          # cross-chunk infini-attention state (optional)
 
     with torch.no_grad():
         for chunk in tqdm(chunks, desc="Compressing"):
             x = torch.from_numpy(chunk.astype(np.int64)).unsqueeze(0).to(args.device)
             # (1, T) — values in [0, 255]
 
-            # ── Shifted input: [SOS, x_0, …, x_{T-2}] ───────────────────
-            # This ensures  probs[t] = P(x[t] | x[0..t-1], memories)
-            # so the encoder CDF at position t does NOT see x[t] itself,
-            # meaning the decoder can reproduce it autoregressively.
-            x_shifted = torch.cat([SOS, x[:, :-1]], dim=1)  # (1, T)
-
             with torch.amp.autocast(amp_device, enabled=use_amp):
-                probs, _, _ = model.get_probs(x_shifted, memories)
+                probs, _, _ = model.get_probs(
+                    x,
+                    memories if args.use_memory else None,
+                )
 
-            probs_f32 = probs.float()                    # (1, T, 256)
-            compressed_chunks.append(gpu_encode(probs_f32, x))
-            total_bpd += theoretical_bpd(probs_f32, x)
+            # Training/eval objective predicts x[t+1] from position t.
+            # Encode the first byte raw, then arithmetic-code x[1:] using probs[:, :-1].
+            probs_f32 = probs[:, :-1, :].float()         # (1, T-1, 256)
+            syms      = x[:, 1:]                          # (1, T-1)
+            first_raw = bytes([int(x[0, 0].item())])
+            encoded   = gpu_encode(probs_f32, syms) if syms.numel() > 0 else b""
+            compressed_chunks.append(first_raw + encoded)
 
-            # ── Memory update: run full x so decompress can mirror exactly ─
-            with torch.amp.autocast(amp_device, enabled=use_amp):
-                _, memories, _ = model(x, memories)
-            memories = [mm.detach() if mm is not None else None for mm in memories]
+            tail_bpd = theoretical_bpd(probs_f32, syms) if syms.numel() > 0 else 0.0
+            chunk_bpd = (8.0 + tail_bpd * max(0, x.size(1) - 1)) / x.size(1)
+            total_bpd += chunk_bpd
+
+            # Keep memory update optional; decode must use the same setting.
+            if args.use_memory:
+                with torch.amp.autocast(amp_device, enabled=use_amp):
+                    _, memories, _ = model(x, memories)
+                memories = [mm.detach() if mm is not None else None for mm in memories]
 
     mean_bpd = total_bpd / len(chunks)
     with open(args.output, "wb") as f:

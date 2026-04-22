@@ -16,8 +16,9 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(pos * div)
         self.register_buffer("pe", pe.unsqueeze(0))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.pe[:, : x.size(1)]
+    def forward(self, x: torch.Tensor, position_offset: int = 0) -> torch.Tensor:
+        end = position_offset + x.size(1)
+        return x + self.pe[:, position_offset:end]
 
 
 class TDTEmbedding(nn.Module):
@@ -35,7 +36,7 @@ class TDTEmbedding(nn.Module):
         ])
         self.type_scale = nn.Parameter(torch.ones(4))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, position_offset: int = 0) -> torch.Tensor:
         """x : (B, T) -> (B, T, d_model)
 
         Vectorized single-lookup: eliminates the 4×(bool-mask + scatter) graph
@@ -48,7 +49,7 @@ class TDTEmbedding(nn.Module):
         per forward (fused by the compiler into a no-copy view on most paths).
         """
         B, T = x.shape
-        pos_type  = torch.arange(T, device=x.device) % 4            # [T]
+        pos_type  = (torch.arange(T, device=x.device) + position_offset) % 4  # [T]
         # Combined lookup: row = byte_value + table_index * 256
         combined  = torch.cat([emb.weight for emb in self.embeds], dim=0)  # [1024, D]
         x_shifted = x + pos_type.unsqueeze(0).mul(256)               # [B, T]

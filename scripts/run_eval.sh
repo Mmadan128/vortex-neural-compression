@@ -24,10 +24,12 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
 FULL=""
+SAMPLE_MB="200"
 JOBS=()
 for arg in "$@"; do
   case "$arg" in
     --full) FULL="--full-vortex" ;;
+    --sample-mb=*) SAMPLE_MB="${arg#*=}" ;;
     atlas|camel) JOBS+=("$arg") ;;
     *) echo "[warn] Unknown arg '$arg', ignoring." ;;
   esac
@@ -83,7 +85,8 @@ run_eval() {
     --data     "$TEST_BIN" \
     --config   "$CONFIG"  \
     --out-json "$OUT_JSON" \
-    --sample-mb 200 \
+    --sample-mb "$SAMPLE_MB" \
+    --vortex-mb "$SAMPLE_MB" \
     $FULL
 }
 
