@@ -36,7 +36,8 @@ SAMPLE_MB  = 1024  # default MB for both baselines and Vortex (1 GB)
 DEFAULT_DATA = "experiments/atlas_experiment/data/mc-flavtag-ttbar-medium.bin"
 
 def _read_sample(path: str, max_mb: float = SAMPLE_MB) -> bytes:
-    max_bytes = int(max_mb * 1024 * 1024)
+    file_size = os.path.getsize(path)
+    max_bytes = min(int(max_mb * 1024 * 1024), file_size)
     with open(path, "rb") as f:
         return f.read(max_bytes)
 
