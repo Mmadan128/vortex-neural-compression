@@ -16,27 +16,54 @@ SKIP_SETUP="${SKIP_SETUP:-0}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 FULL_VORTEX="${FULL_VORTEX:-0}"
+FORCE_VENV="${FORCE_VENV:-0}"
 
 LOG_DIR="${LOG_DIR:-logs/mi300x_camel_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$LOG_DIR" results
 
-if [[ -x ".venv/bin/python" ]]; then
-  PYTHON=".venv/bin/python"
+if python3 - <<'PY' >/dev/null 2>&1
+import torch
+ok = bool(torch.cuda.is_available()) and (torch.version.hip is not None)
+raise SystemExit(0 if ok else 1)
+PY
+then
+  SYSTEM_ROCM_OK=1
 else
+  SYSTEM_ROCM_OK=0
+fi
+
+if [[ "$SYSTEM_ROCM_OK" == "1" && "$FORCE_VENV" != "1" ]]; then
   PYTHON="python3"
+else
+  if [[ -x ".venv/bin/python" ]]; then
+    PYTHON=".venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
 fi
 
 if [[ "$SKIP_SETUP" != "1" ]]; then
-  if [[ ! -x ".venv/bin/python" ]]; then
-    echo "[setup] Creating virtual environment (.venv)"
-    python3 -m venv .venv
-    PYTHON=".venv/bin/python"
+  if [[ "$PYTHON" == "python3" ]]; then
+    echo "[setup] Using system Python with ROCm torch"
+  else
+    if [[ ! -x ".venv/bin/python" ]]; then
+      echo "[setup] Creating virtual environment (.venv)"
+      python3 -m venv .venv
+      PYTHON=".venv/bin/python"
+    fi
   fi
 
   echo "[setup] Installing dependencies"
   "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
   "$PYTHON" -m pip install --upgrade pip setuptools wheel
-  "$PYTHON" -m pip install -r requirements.txt
+  if [[ "$SYSTEM_ROCM_OK" == "1" ]]; then
+    TMP_REQ="$(mktemp)"
+    grep -E -v '^[[:space:]]*torch([[:space:]]|[<>=!~]|$)' requirements.txt > "$TMP_REQ"
+    "$PYTHON" -m pip install -r "$TMP_REQ"
+    rm -f "$TMP_REQ"
+  else
+    "$PYTHON" -m pip install -r requirements.txt
+  fi
 fi
 
 echo "[info] Python: $PYTHON"

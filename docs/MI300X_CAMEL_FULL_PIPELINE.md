@@ -88,3 +88,21 @@ If you want a single block after SSH:
     nohup env FULL_VORTEX=1 SAMPLE_MB=999999 VORTEX_MB=999999 EVAL_BATCH_SIZE=128 ./scripts/full_pipeline_mi300x_camel.sh > full_pipeline.out 2>&1 &
     echo "PID: $!"
     tail -f full_pipeline.out
+
+## 13) Troubleshooting: CUDA torch accidentally installed on MI300X
+
+Symptom:
+- Pipeline prints torch with +cuXXX and then fails with CUDA/ROCm not available.
+
+Quick recovery:
+
+    cd /path/to/vortex-codec
+    rm -rf .venv
+    python3 -m pip install --upgrade pip setuptools wheel
+    python3 -m pip install -r <(grep -E -v '^[[:space:]]*torch([[:space:]]|[<>=!~]|$)' requirements.txt)
+    python3 -c "import torch; print('torch=', torch.__version__); print('cuda_available=', torch.cuda.is_available()); print('hip=', torch.version.hip)"
+    SKIP_SETUP=1 SKIP_DOWNLOAD=1 FULL_VORTEX=1 SAMPLE_MB=999999 VORTEX_MB=999999 EVAL_BATCH_SIZE=128 ./scripts/full_pipeline_mi300x_camel.sh
+
+Notes:
+- On MI300X, expected check output is cuda_available=True and hip not None.
+- If you still see +cu in torch version, the active environment is not using ROCm torch.
